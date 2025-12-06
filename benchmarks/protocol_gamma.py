@@ -217,37 +217,69 @@ def run_tests() -> Tuple[int, int, List[str]]:
     test("graph creation", test_graph_creation)
 
     def test_orchestrator_run():
+        import agents.orchestrator as orch
         from agents.orchestrator import TDDOrchestrator
+        from agents.tools import set_db
+        from core.graph_db import ParagonDB
+        from core.llm import reset_llm
 
-        orchestrator = TDDOrchestrator(enable_checkpointing=False)
+        # CRITICAL: Reset global state to avoid context bloat from previous tests
+        set_db(ParagonDB())
+        reset_llm()
 
-        result = orchestrator.run(
-            session_id="test-session-1",
-            task_id="test-task-1",
-            spec="Implement a simple function",
-            requirements=["Must be fast", "Must be correct"],
-            max_iterations=3,
-        )
+        # Protocol Gamma tests ORCHESTRATION LOGIC, not LLM API integration.
+        # LLM integration is tested separately in Protocol Delta.
+        # Mocking LLM ensures fast, deterministic tests without rate limit risk.
+        original_llm = orch.LLM_AVAILABLE
+        orch.LLM_AVAILABLE = False
 
-        # Should complete (simulated tests pass on iteration 2)
-        assert result is not None
-        assert result.get("final_status") in ("passed", "failed", None)  # May vary
+        try:
+            orchestrator = TDDOrchestrator(enable_checkpointing=False)
+
+            result = orchestrator.run(
+                session_id="test-session-1",
+                task_id="test-task-1",
+                spec="Implement a simple function",
+                requirements=["Must be fast", "Must be correct"],
+                max_iterations=3,
+            )
+
+            # Should complete (simulated tests pass on iteration 2)
+            assert result is not None
+            assert result.get("final_status") in ("passed", "failed", None)
+        finally:
+            orch.LLM_AVAILABLE = original_llm
 
     test("orchestrator run", test_orchestrator_run)
 
     def test_convenience_function():
+        import agents.orchestrator as orch
         from agents.orchestrator import run_tdd_cycle
+        from agents.tools import set_db
+        from core.graph_db import ParagonDB
+        from core.llm import reset_llm
 
-        result = run_tdd_cycle(
-            spec="Simple test spec",
-            requirements=["req1", "req2"],
-        )
+        # Reset global state to avoid context bloat
+        set_db(ParagonDB())
+        reset_llm()
 
-        assert result is not None
-        # Verify state structure
-        assert "session_id" in result
-        assert "task_id" in result
-        assert "messages" in result
+        # Mock LLM for deterministic testing
+        original_llm = orch.LLM_AVAILABLE
+        orch.LLM_AVAILABLE = False
+
+        try:
+            result = run_tdd_cycle(
+                spec="Simple test spec",
+                requirements=["req1", "req2"],
+            )
+
+            assert result is not None
+            # Verify state structure
+            assert "session_id" in result
+            assert "task_id" in result
+            assert "messages" in result
+        finally:
+            orch.LLM_AVAILABLE = original_llm
 
     test("run_tdd_cycle convenience", test_convenience_function)
 
@@ -416,29 +448,40 @@ def run_tests() -> Tuple[int, int, List[str]]:
 
     def test_tools_with_orchestrator():
         """Test that tools work within orchestrator context."""
+        import agents.orchestrator as orch
         from agents.tools import set_db, get_db, add_node, get_graph_stats
         from agents.orchestrator import TDDOrchestrator
         from core.graph_db import ParagonDB
+        from core.llm import reset_llm
 
-        # Fresh DB
+        # Fresh DB and LLM to avoid context bloat
         set_db(ParagonDB())
+        reset_llm()
 
         # Add some nodes via tools
         add_node("SPEC", "Build a calculator")
         add_node("CODE", "def add(a, b): return a + b")
         add_node("TEST", "assert add(1, 2) == 3")
 
-        # Run orchestrator (uses same global DB)
-        orchestrator = TDDOrchestrator(enable_checkpointing=False)
-        result = orchestrator.run(
-            session_id="integration-test",
-            task_id="calc-task",
-            spec="Calculator implementation",
-        )
+        # Mock LLM for deterministic testing
+        original_llm = orch.LLM_AVAILABLE
+        orch.LLM_AVAILABLE = False
 
-        # DB should still have our nodes
-        stats = get_graph_stats()
-        assert stats["node_count"] >= 3
+        try:
+            # Run orchestrator (uses same global DB)
+            orchestrator = TDDOrchestrator(enable_checkpointing=False)
+            result = orchestrator.run(
+                session_id="integration-test",
+                task_id="calc-task",
+                spec="Calculator implementation",
+                max_iterations=3,
+            )
+
+            # DB should still have our nodes
+            stats = get_graph_stats()
+            assert stats["node_count"] >= 3
+        finally:
+            orch.LLM_AVAILABLE = original_llm
 
     test("tools with orchestrator", test_tools_with_orchestrator)
 
@@ -479,7 +522,9 @@ def run_tests() -> Tuple[int, int, List[str]]:
         for f in failures:
             print(f"  - {f}")
 
-    return passed, failed, failures
+    # Return format: (passed, total, errors) to match run_all.py expectations
+    total = passed + failed
+    return passed, total, failures
 
 
 if __name__ == "__main__":

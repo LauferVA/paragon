@@ -67,10 +67,30 @@ rate_limit_burst = 10
 default_provider = "anthropic"
 
 # Model tier assignments
+# Note: Use LiteLLM format "provider/model" for explicit routing
 [llm.models]
-heavy = "claude-sonnet-4-20250514"
-standard = "claude-3-5-haiku-20241022"
-light = "claude-3-5-haiku-20241022"
+# High Reasoning tier: Best for complex tasks
+heavy = "claude-sonnet-4-5-20250929"
+# Standard tier: Fast and capable
+standard = "claude-haiku-4-5-20251001"
+# Light tier: Quick tasks
+light = "claude-haiku-4-5-20251001"
+
+# Legacy model options (still available)
+[llm.models.legacy]
+sonnet_4 = "claude-sonnet-4-20250514"
+haiku_35 = "claude-3-5-haiku-20241022"
+
+# Additional model options (for manual override)
+[llm.models.alternatives]
+# OpenAI fallback for one-shot coding tasks
+openai_codex = "gpt-4o"
+# Google flagship
+google_pro = "gemini-3-pro-preview"
+# Google stable
+google_stable = "gemini-2.5-pro"
+# OpenAI mini for mundane tasks
+openai_mini = "gpt-4o-mini"
 
 # =============================================================================
 # ALIGNMENT ENGINE CONFIGURATION
@@ -158,19 +178,47 @@ poll_interval_seconds = 5
 # =============================================================================
 # LLM ROUTING CONFIGURATION (Cost Arbitrage)
 # =============================================================================
+# Routes tasks to appropriate models based on complexity
 
 [llm.routing]
-# High-reasoning tasks (Architect, Builder, Coder)
+# High-reasoning tasks (Architect, Builder, Coder, Auditor)
+# Primary: claude-sonnet-4-5 - Current flagship
 high_reasoning_provider = "anthropic"
-high_reasoning_model = "claude-sonnet-4-20250514"
+high_reasoning_model = "claude-sonnet-4-5-20250929"
+
+# Fast reasoner alternative
+high_reasoning_fast_provider = "anthropic"
+high_reasoning_fast_model = "claude-haiku-4-5-20251001"
+
+# OpenAI fallback for one-shot coding
+high_reasoning_openai_provider = "openai"
+high_reasoning_openai_model = "gpt-4o"
+
+# Google fallback
+high_reasoning_google_provider = "gemini"
+high_reasoning_google_model = "gemini-3-pro-preview"
 
 # Mundane tasks (Documenter, LogScrubber, Formatter)
-mundane_provider = "ollama"
-mundane_model = "llama3"
+# Primary: claude-haiku-4-5 - Fast and cheap
+mundane_provider = "anthropic"
+mundane_model = "claude-haiku-4-5-20251001"
+
+# Local fallback (for cost savings or offline use)
+mundane_local_provider = "ollama"
+mundane_local_model = "llama3.3"
+
+# OpenAI mini fallback
+mundane_openai_provider = "openai"
+mundane_openai_model = "gpt-4o-mini"
 
 # Fallback if local model unavailable
 mundane_fallback_provider = "anthropic"
 mundane_fallback_model = "claude-3-5-haiku-20241022"
+
+# Sensitive tasks (PII, Secrets, Internal Logs)
+# HARD ROUTE: Local only - network requests blocked for this tier
+sensitive_provider = "ollama"
+sensitive_model = "llama3.3"
 
 # =============================================================================
 # RESEARCH CONFIGURATION (Web Search)

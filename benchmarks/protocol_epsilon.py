@@ -622,9 +622,15 @@ def run_protocol_epsilon():
         for error in result.errors:
             print(f"  ERROR: {error[0]}")
 
-    return result.wasSuccessful()
+    # Return format expected by run_all.py
+    passed = result.testsRun - len(result.failures) - len(result.errors)
+    return {
+        "passed": passed,
+        "total": result.testsRun,
+        "errors": [str(f[0]) for f in result.failures + result.errors],
+    }
 
 
 if __name__ == "__main__":
-    success = run_protocol_epsilon()
-    sys.exit(0 if success else 1)
+    result = run_protocol_epsilon()
+    sys.exit(0 if result["passed"] == result["total"] else 1)

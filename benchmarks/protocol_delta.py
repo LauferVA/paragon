@@ -634,9 +634,12 @@ def run_tests():
             for test, trace in result.errors:
                 print(f"  - {test}: {trace.split(chr(10))[0]}")
 
-    return result.wasSuccessful()
+    # Return format expected by run_all.py: (passed, total, errors)
+    passed = result.testsRun - len(result.failures) - len(result.errors)
+    errors = [str(f[0]) for f in result.failures + result.errors]
+    return passed, result.testsRun, errors
 
 
 if __name__ == "__main__":
-    success = run_tests()
-    sys.exit(0 if success else 1)
+    passed, total, errors = run_tests()
+    sys.exit(0 if passed == total else 1)

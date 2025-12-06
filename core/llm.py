@@ -42,6 +42,7 @@ from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
+    wait_fixed,
     retry_if_exception_type,
     RetryError,
 )
@@ -60,14 +61,19 @@ class TaskType(Enum):
 
     HIGH_REASONING: Complex tasks requiring deep reasoning
         - Examples: Architect (design decisions), Builder (code generation),
-                   Coder (complex refactoring)
+                   Coder (complex refactoring), Auditor (verification)
 
     MUNDANE: Simple tasks with deterministic outputs
         - Examples: Documenter (formatting), LogScrubber (cleanup),
                    Formatter (style enforcement)
+
+    SENSITIVE: Tasks involving PII, secrets, or internal logs
+        - HARD ROUTED to local models only (no network requests)
+        - Examples: Credential handling, internal log scrubbing
     """
     HIGH_REASONING = "high_reasoning"
     MUNDANE = "mundane"
+    SENSITIVE = "sensitive"
 
 
 # =============================================================================
@@ -79,25 +85,40 @@ class ModelRouter:
     Deterministic router for cost-optimized model selection.
 
     Routes tasks to appropriate models based on complexity:
-    - HIGH_REASONING -> Expensive models (Claude Sonnet)
-    - MUNDANE -> Cheap/local models (Ollama/Llama3)
+    - HIGH_REASONING -> Expensive models (Claude Sonnet 4.5)
+    - MUNDANE -> Cheap/local models (Claude Haiku 4.5 / Ollama/Llama3.3)
+
+    Model Tiers (Updated December 2025):
+
+    A. High Reasoning (Architect, Coder, Auditor):
+        - Primary: claude-sonnet-4-5-20250929 (recursive self-correction)
+        - Fast Reasoner: claude-haiku-4-5-20251001 (matches old Sonnet perf)
+        - Legacy Stable: claude-sonnet-4-20250514
+        - OpenAI Fallback: gpt-4o (superior one-shot coding)
+        - Google Fallback: gemini-3-pro-preview
+
+    B. Mundane / High Volume (Log Scrubbing, Formatting, Docs):
+        - Primary: claude-haiku-4-5-20251001
+        - Secondary: claude-3-5-haiku-20241022
+        - Local: ollama/llama3.3 (70B, 128K context)
+        - OpenAI: gpt-4o-mini
 
     Usage:
         config = load_config()
         router = ModelRouter(config["llm"]["routing"])
 
         provider, model = router.route(TaskType.HIGH_REASONING)
-        # Returns: ("anthropic", "claude-sonnet-4-20250514")
+        # Returns: ("anthropic", "claude-sonnet-4-5-20250929")
 
         provider, model = router.route(TaskType.MUNDANE)
-        # Returns: ("ollama", "llama3")
+        # Returns: ("anthropic", "claude-haiku-4-5-20251001")
 
     Configuration (from paragon.toml):
         [llm.routing]
         high_reasoning_provider = "anthropic"
-        high_reasoning_model = "claude-sonnet-4-20250514"
-        mundane_provider = "ollama"
-        mundane_model = "llama3"
+        high_reasoning_model = "claude-sonnet-4-5-20250929"
+        mundane_provider = "anthropic"
+        mundane_model = "claude-haiku-4-5-20251001"
         mundane_fallback_provider = "anthropic"
         mundane_fallback_model = "claude-3-5-haiku-20241022"
     """
@@ -108,18 +129,23 @@ class ModelRouter:
 
         Args:
             config: Configuration dict from [llm.routing] section
+
+        Note: Model names must include provider prefix for LiteLLM
+        (e.g., "anthropic/claude-sonnet-4-5-20250929")
         """
         # High reasoning configuration
+        # Default: claude-sonnet-4-5 (current production flagship)
         self.high_reasoning_provider = config.get(
             "high_reasoning_provider", "anthropic"
         )
         self.high_reasoning_model = config.get(
-            "high_reasoning_model", "claude-sonnet-4-20250514"
+            "high_reasoning_model", "claude-sonnet-4-5-20250929"
         )
 
         # Mundane task configuration
-        self.mundane_provider = config.get("mundane_provider", "ollama")
-        self.mundane_model = config.get("mundane_model", "llama3")
+        # Default: claude-haiku-4-5 (fast and cheap)
+        self.mundane_provider = config.get("mundane_provider", "anthropic")
+        self.mundane_model = config.get("mundane_model", "claude-haiku-4-5-20251001")
 
         # Fallback for when local models unavailable
         self.mundane_fallback_provider = config.get(
@@ -129,28 +155,36 @@ class ModelRouter:
             "mundane_fallback_model", "claude-3-5-haiku-20241022"
         )
 
+        # Sensitive task configuration (HARD ROUTE to local only)
+        self.sensitive_provider = config.get("sensitive_provider", "ollama")
+        self.sensitive_model = config.get("sensitive_model", "llama3.3")
+
     def route(self, task_type: TaskType, use_fallback: bool = False) -> Tuple[str, str]:
         """
         Route a task to the appropriate model.
 
         Args:
-            task_type: The type of task (HIGH_REASONING or MUNDANE)
+            task_type: The type of task (HIGH_REASONING, MUNDANE, or SENSITIVE)
             use_fallback: If True, use fallback for MUNDANE tasks (for local model failures)
+                         Note: SENSITIVE tasks never use fallback (security requirement)
 
         Returns:
             Tuple of (provider, model) strings
                 - provider: LiteLLM provider identifier (e.g., "anthropic", "ollama")
-                - model: Model identifier (e.g., "claude-sonnet-4-20250514", "llama3")
+                - model: Model identifier (e.g., "claude-4-5-sonnet-20250921", "llama3")
 
         Examples:
             >>> router.route(TaskType.HIGH_REASONING)
-            ('anthropic', 'claude-sonnet-4-20250514')
+            ('anthropic', 'claude-sonnet-4-5-20250929')
 
             >>> router.route(TaskType.MUNDANE)
-            ('ollama', 'llama3')
+            ('anthropic', 'claude-haiku-4-5-20251001')
 
             >>> router.route(TaskType.MUNDANE, use_fallback=True)
             ('anthropic', 'claude-3-5-haiku-20241022')
+
+            >>> router.route(TaskType.SENSITIVE)
+            ('ollama', 'llama3.3')  # Always local, no network
         """
         if task_type == TaskType.HIGH_REASONING:
             return (self.high_reasoning_provider, self.high_reasoning_model)
@@ -160,6 +194,10 @@ class ModelRouter:
                 return (self.mundane_fallback_provider, self.mundane_fallback_model)
             else:
                 return (self.mundane_provider, self.mundane_model)
+
+        elif task_type == TaskType.SENSITIVE:
+            # HARD ROUTE: Always local, ignore use_fallback for security
+            return (self.sensitive_provider, self.sensitive_model)
 
         else:
             # Should never happen with Enum type safety
@@ -179,7 +217,7 @@ class ModelRouter:
         provider, model = self.route(task_type, use_fallback)
 
         # LiteLLM format: "provider/model" or just "model" for some providers
-        if provider in ["anthropic", "openai"]:
+        if provider in ["anthropic", "openai", "gemini"]:
             # These providers need explicit prefix
             return f"{provider}/{model}"
         else:
@@ -221,7 +259,7 @@ class StructuredLLM:
     4. Retry on validation failures (up to 3 attempts)
 
     Usage:
-        llm = StructuredLLM(model="claude-sonnet-4-20250514")
+        llm = StructuredLLM(model="claude-sonnet-4-5-20250929")
 
         class MyOutput(msgspec.Struct):
             name: str
@@ -237,7 +275,7 @@ class StructuredLLM:
 
     def __init__(
         self,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-sonnet-4-5-20250929",
         temperature: float = 0.0,
         max_tokens: int = 4096,
     ):
@@ -245,7 +283,7 @@ class StructuredLLM:
         Initialize the structured LLM.
 
         Args:
-            model: LiteLLM model identifier (e.g., "gpt-4-turbo", "claude-sonnet-4-20250514")
+            model: LiteLLM model identifier (e.g., "gpt-4o", "claude-sonnet-4-5-20250929")
             temperature: Sampling temperature (0.0 = deterministic)
             max_tokens: Maximum tokens in response
         """
@@ -384,6 +422,33 @@ CRITICAL RULES:
             # Invalid JSON structure
             raise ValidationError(f"JSON decode failed: {e}")
         except litellm.RateLimitError as e:
+            # Extract retry-after from headers if available
+            retry_after = getattr(e, 'retry_after', None)
+            if retry_after:
+                import time
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"Rate limited. Waiting {retry_after}s before retry..."
+                )
+                time.sleep(float(retry_after))
+                # Retry once after waiting
+                try:
+                    response = litellm.completion(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": full_system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        temperature=self.temperature,
+                        max_tokens=self.max_tokens,
+                        response_format={"type": "json_object"},
+                        drop_params=True,
+                    )
+                    content = response.choices[0].message.content
+                    content = self._clean_response(content)
+                    return msgspec.json.decode(content.encode("utf-8"), type=schema)
+                except Exception:
+                    pass  # Fall through to raise
             raise RateLimitError(f"Rate limited: {e}")
         except RetryError:
             # All retries exhausted
@@ -467,12 +532,23 @@ def get_llm() -> StructuredLLM:
     Get the global LLM instance.
 
     Configurable via environment variables:
-    - PARAGON_LLM_MODEL: Model identifier (default: claude-sonnet-4-20250514)
+    - PARAGON_LLM_MODEL: Model identifier (default: anthropic/claude-sonnet-4-5-20250929)
     - PARAGON_LLM_TEMPERATURE: Temperature (default: 0.0)
+
+    Model Options (Updated December 2025):
+    - anthropic/claude-sonnet-4-5-20250929 (Current flagship, recursive self-correction)
+    - anthropic/claude-haiku-4-5-20251001 (Fast, matches old Sonnet perf)
+    - anthropic/claude-opus-4-5-20251101 (Premium, maximum intelligence)
+    - anthropic/claude-sonnet-4-20250514 (Legacy stable)
+    - openai/gpt-4o (Superior one-shot coding)
+    - gemini/gemini-3-pro-preview (Google flagship)
+
+    Note: LiteLLM requires provider prefix (anthropic/, openai/, gemini/, etc.)
     """
     global _llm_instance
     if _llm_instance is None:
-        model = os.getenv("PARAGON_LLM_MODEL", "claude-sonnet-4-20250514")
+        # Use current flagship model as default
+        model = os.getenv("PARAGON_LLM_MODEL", "anthropic/claude-sonnet-4-5-20250929")
         temperature = float(os.getenv("PARAGON_LLM_TEMPERATURE", "0.0"))
         _llm_instance = StructuredLLM(model=model, temperature=temperature)
     return _llm_instance
