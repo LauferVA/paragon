@@ -19,6 +19,9 @@ Architecture:
     [Inject JSON Schema into System Prompt]
         |
         v
+    [RateLimitGuard - Token bucket throttling]
+        |
+        v
     LiteLLM.completion(response_format=json_object)
         |
         v
@@ -31,12 +34,23 @@ Model Routing (Cost Arbitrage):
     ModelRouter routes tasks to appropriate models based on task complexity:
     - HIGH_REASONING tasks (Architect, Builder, Coder) -> Claude Sonnet
     - MUNDANE tasks (Documenter, LogScrubber, Formatter) -> Ollama/Llama3
+
+Rate Limit Protection:
+    RateLimitGuard implements proactive throttling to prevent 429 errors:
+    - Tracks requests per minute (RPM) and tokens per minute (TPM)
+    - Pre-emptively waits when approaching limits
+    - Respects retry-after headers when limits are hit
+    - Configurable per-tier limits (default: Tier 1)
 """
 import os
 import json
+import time
+import logging
 import msgspec
 from typing import Type, TypeVar, Optional, Any, Dict, List, Tuple
 from enum import Enum
+from threading import Lock
+from collections import deque
 import litellm
 from tenacity import (
     retry,
@@ -46,6 +60,8 @@ from tenacity import (
     retry_if_exception_type,
     RetryError,
 )
+
+logger = logging.getLogger(__name__)
 
 # Generic type for return values
 T = TypeVar("T", bound=msgspec.Struct)
@@ -74,6 +90,181 @@ class TaskType(Enum):
     HIGH_REASONING = "high_reasoning"
     MUNDANE = "mundane"
     SENSITIVE = "sensitive"
+
+
+# =============================================================================
+# RATE LIMIT GUARD (Proactive Throttling)
+# =============================================================================
+
+class RateLimitGuard:
+    """
+    Proactive rate limit protection using sliding window.
+
+    Prevents 429 errors by tracking usage and waiting proactively.
+    Thread-safe for concurrent usage.
+
+    Tier Limits (Anthropic, as of Dec 2025):
+        Tier 1: 50 RPM, 30K ITPM, 8K OTPM (Sonnet 4.x)
+        Tier 2: 1000 RPM, 450K ITPM, 90K OTPM
+        Tier 3: 2000 RPM, 800K ITPM, 160K OTPM
+        Tier 4: 4000 RPM, 2M ITPM, 400K OTPM
+
+    Usage:
+        guard = RateLimitGuard(rpm_limit=50, tpm_limit=30000)
+        guard.wait_if_needed(estimated_tokens=3000)
+        # ... make API call ...
+        guard.record_usage(actual_tokens=2500)
+    """
+
+    def __init__(
+        self,
+        rpm_limit: int = 50,
+        tpm_limit: int = 30000,
+        safety_margin: float = 0.8,  # Use only 80% of limit
+    ):
+        """
+        Initialize rate limit guard.
+
+        Args:
+            rpm_limit: Maximum requests per minute
+            tpm_limit: Maximum tokens per minute (input tokens for Anthropic)
+            safety_margin: Fraction of limit to use (0.8 = 80%)
+        """
+        self.rpm_limit = int(rpm_limit * safety_margin)
+        self.tpm_limit = int(tpm_limit * safety_margin)
+
+        # Sliding window tracking (timestamp, tokens)
+        self._requests: deque = deque()  # timestamps of requests
+        self._tokens: deque = deque()    # (timestamp, token_count) tuples
+        self._lock = Lock()
+
+        # Retry-after tracking
+        self._retry_after_until: float = 0.0
+
+    def _cleanup_old_entries(self, now: float) -> None:
+        """Remove entries older than 60 seconds."""
+        cutoff = now - 60.0
+
+        while self._requests and self._requests[0] < cutoff:
+            self._requests.popleft()
+
+        while self._tokens and self._tokens[0][0] < cutoff:
+            self._tokens.popleft()
+
+    def _current_rpm(self) -> int:
+        """Get current requests in the last minute."""
+        return len(self._requests)
+
+    def _current_tpm(self) -> int:
+        """Get current tokens in the last minute."""
+        return sum(t[1] for t in self._tokens)
+
+    def wait_if_needed(self, estimated_tokens: int = 3000) -> float:
+        """
+        Wait if we're approaching rate limits.
+
+        Args:
+            estimated_tokens: Estimated input tokens for the request
+
+        Returns:
+            Seconds waited (0 if no wait needed)
+        """
+        with self._lock:
+            now = time.time()
+            self._cleanup_old_entries(now)
+
+            # Check retry-after first
+            if now < self._retry_after_until:
+                wait_time = self._retry_after_until - now
+                logger.info(f"Rate limit: waiting {wait_time:.1f}s (retry-after)")
+                time.sleep(wait_time)
+                return wait_time
+
+            total_wait = 0.0
+
+            # Check RPM
+            if self._current_rpm() >= self.rpm_limit:
+                # Wait until oldest request expires
+                oldest = self._requests[0]
+                wait_time = 60.0 - (now - oldest) + 0.1  # +0.1s buffer
+                if wait_time > 0:
+                    logger.info(f"Rate limit: waiting {wait_time:.1f}s (RPM: {self._current_rpm()}/{self.rpm_limit})")
+                    time.sleep(wait_time)
+                    total_wait += wait_time
+                    now = time.time()
+                    self._cleanup_old_entries(now)
+
+            # Check TPM
+            projected_tpm = self._current_tpm() + estimated_tokens
+            if projected_tpm >= self.tpm_limit:
+                # Wait until enough tokens expire
+                tokens_to_free = projected_tpm - self.tpm_limit + 1000  # +1000 buffer
+                freed = 0
+                wait_until = now
+
+                for ts, count in self._tokens:
+                    freed += count
+                    wait_until = ts + 60.0
+                    if freed >= tokens_to_free:
+                        break
+
+                wait_time = wait_until - now + 0.1
+                if wait_time > 0:
+                    logger.info(f"Rate limit: waiting {wait_time:.1f}s (TPM: {self._current_tpm()}/{self.tpm_limit})")
+                    time.sleep(wait_time)
+                    total_wait += wait_time
+
+            return total_wait
+
+    def record_usage(self, tokens: int) -> None:
+        """Record a completed request and its token usage."""
+        with self._lock:
+            now = time.time()
+            self._requests.append(now)
+            self._tokens.append((now, tokens))
+
+    def set_retry_after(self, seconds: float) -> None:
+        """Set retry-after from a 429 response."""
+        with self._lock:
+            self._retry_after_until = time.time() + seconds
+            logger.warning(f"Rate limit hit, retry-after: {seconds}s")
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get current rate limit status."""
+        with self._lock:
+            now = time.time()
+            self._cleanup_old_entries(now)
+            return {
+                "rpm_used": self._current_rpm(),
+                "rpm_limit": self.rpm_limit,
+                "tpm_used": self._current_tpm(),
+                "tpm_limit": self.tpm_limit,
+                "retry_after_remaining": max(0, self._retry_after_until - now),
+            }
+
+
+# Global rate limit guard (shared across all LLM instances)
+_rate_limit_guard: Optional[RateLimitGuard] = None
+_rate_limit_lock = Lock()
+
+
+def get_rate_limit_guard() -> RateLimitGuard:
+    """Get or create the global rate limit guard."""
+    global _rate_limit_guard
+    with _rate_limit_lock:
+        if _rate_limit_guard is None:
+            # Default to Tier 1 limits, can be configured via env
+            rpm = int(os.getenv("PARAGON_RATE_LIMIT_RPM", "50"))
+            tpm = int(os.getenv("PARAGON_RATE_LIMIT_TPM", "30000"))
+            _rate_limit_guard = RateLimitGuard(rpm_limit=rpm, tpm_limit=tpm)
+        return _rate_limit_guard
+
+
+def reset_rate_limit_guard() -> None:
+    """Reset the global rate limit guard (for testing)."""
+    global _rate_limit_guard
+    with _rate_limit_lock:
+        _rate_limit_guard = None
 
 
 # =============================================================================
@@ -356,6 +547,11 @@ CRITICAL RULES:
         # Remove any leading/trailing whitespace after cleanup
         return content.strip()
 
+    def _estimate_tokens(self, system_prompt: str, user_prompt: str) -> int:
+        """Estimate input tokens for rate limiting (rough: 4 chars per token)."""
+        total_chars = len(system_prompt) + len(user_prompt)
+        return max(100, total_chars // 4)
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -386,11 +582,18 @@ CRITICAL RULES:
 
         Mechanism:
         1. Inject JSON Schema into System Prompt
-        2. Force JSON mode via response_format (where supported)
-        3. Validate/Parse with msgspec (High Performance)
-        4. Retry on Validation Error (up to 3 times)
+        2. Proactive Rate Limit Check (wait if needed)
+        3. Force JSON mode via response_format (where supported)
+        4. Validate/Parse with msgspec (High Performance)
+        5. Record usage for rate limiting
+        6. Retry on Validation Error (up to 3 times)
         """
         full_system_prompt = self._build_system_prompt(system_prompt, schema)
+
+        # Proactive rate limit protection
+        guard = get_rate_limit_guard()
+        estimated_tokens = self._estimate_tokens(full_system_prompt, user_prompt)
+        guard.wait_if_needed(estimated_tokens)
 
         try:
             # LiteLLM handles provider differences
@@ -411,6 +614,10 @@ CRITICAL RULES:
             content = response.choices[0].message.content
             content = self._clean_response(content)
 
+            # Record actual usage for rate limiting
+            actual_tokens = response.usage.prompt_tokens if response.usage else estimated_tokens
+            guard.record_usage(actual_tokens)
+
             # Validation Step (The "Gatekeeper")
             # msgspec is strict by default on types
             return msgspec.json.decode(content.encode("utf-8"), type=schema)
@@ -425,11 +632,7 @@ CRITICAL RULES:
             # Extract retry-after from headers if available
             retry_after = getattr(e, 'retry_after', None)
             if retry_after:
-                import time
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"Rate limited. Waiting {retry_after}s before retry..."
-                )
+                guard.set_retry_after(float(retry_after))
                 time.sleep(float(retry_after))
                 # Retry once after waiting
                 try:
@@ -446,6 +649,8 @@ CRITICAL RULES:
                     )
                     content = response.choices[0].message.content
                     content = self._clean_response(content)
+                    actual_tokens = response.usage.prompt_tokens if response.usage else estimated_tokens
+                    guard.record_usage(actual_tokens)
                     return msgspec.json.decode(content.encode("utf-8"), type=schema)
                 except Exception:
                     pass  # Fall through to raise
