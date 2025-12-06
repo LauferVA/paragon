@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PARAGON Mission Control</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border-color: #30363d;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-red: #f85149;
+            --accent-orange: #d29922;
+            --accent-purple: #a371f7;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Layout */
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            grid-template-rows: 60px 1fr 200px;
+            height: 100vh;
+            gap: 1px;
+            background: var(--border-color);
+        }
+
+        /* Header */
+        .header {
+            grid-column: 1 / -1;
+            background: var(--bg-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--accent-blue);
+        }
+
+        .logo span {
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+
+        .stats {
+            display: flex;
+            gap: 24px;
+        }
+
+        .stat {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: all 0.2s;
+        }
+
+        .btn:hover {
+            background: var(--border-color);
+        }
+
+        .btn-primary {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+            color: #fff;
+        }
+
+        .btn-primary:hover {
+            opacity: 0.9;
+        }
+
+        /* Graph Container */
+        .graph-container {
+            background: var(--bg-primary);
+            position: relative;
+        }
+
+        #graph-canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        .connection-status {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .connection-status.connected {
+            background: rgba(63, 185, 80, 0.2);
+            color: var(--accent-green);
+        }
+
+        .connection-status.disconnected {
+            background: rgba(248, 81, 73, 0.2);
+            color: var(--accent-red);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+        }
+
+        /* Chat Panel */
+        .chat-panel {
+            grid-row: 2 / -1;
+            background: var(--bg-secondary);
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid var(--border-color);
+        }
+
+        .chat-header {
+            padding: 16px;
+            border-bottom: 1px solid var(--border-color);
+            font-weight: 600;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .message {
+            padding: 10px 14px;
+            border-radius: 8px;
+            max-width: 90%;
+            font-size: 0.875rem;
+            line-height: 1.5;
+        }
+
+        .message.user {
+            background: var(--accent-blue);
+            color: #fff;
+            align-self: flex-end;
+        }
+
+        .message.system {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            align-self: flex-start;
+        }
+
+        .message.error {
+            background: rgba(248, 81, 73, 0.2);
+            color: var(--accent-red);
+            align-self: flex-start;
+        }
+
+        .chat-input-container {
+            padding: 16px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .chat-input {
+            width: 100%;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            resize: none;
+        }
+
+        .chat-input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        /* Metrics Panel */
+        .metrics-panel {
+            background: var(--bg-secondary);
+            padding: 16px;
+            overflow-y: auto;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+        }
+
+        .metric-card {
+            background: var(--bg-tertiary);
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .metric-title {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .metric-value.success { color: var(--accent-green); }
+        .metric-value.warning { color: var(--accent-orange); }
+        .metric-value.error { color: var(--accent-red); }
+        .metric-value.info { color: var(--accent-blue); }
+
+        /* Node Type Legend */
+        .legend {
+            display: flex;
+            gap: 16px;
+            padding: 12px 16px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 3px;
+        }
+
+        /* Color mode toggle */
+        .color-toggle {
+            display: flex;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        .color-toggle button {
+            padding: 6px 12px;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+
+        .color-toggle button.active {
+            background: var(--accent-blue);
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">PARAGON <span>Mission Control</span></div>
+
+            <div class="stats">
+                <div class="stat">
+                    <div class="stat-value" id="node-count">0</div>
+                    <div class="stat-label">Nodes</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="edge-count">0</div>
+                    <div class="stat-label">Edges</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value" id="layer-count">0</div>
+                    <div class="stat-label">Layers</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value success" id="verified-count">0</div>
+                    <div class="stat-label">Verified</div>
+                </div>
+            </div>
+
+            <div class="controls">
+                <div class="color-toggle">
+                    <button id="color-type" class="active">By Type</button>
+                    <button id="color-status">By Status</button>
+                </div>
+                <button class="btn" id="refresh-btn">Refresh</button>
+                <button class="btn btn-primary" id="snapshot-btn">Save Snapshot</button>
+            </div>
+        </header>
+
+        <!-- Graph Canvas -->
+        <div class="graph-container">
+            <div class="connection-status disconnected" id="connection-status">
+                <span class="status-dot"></span>
+                <span id="status-text">Disconnected</span>
+            </div>
+            <div id="graph-canvas"></div>
+        </div>
+
+        <!-- Chat Panel -->
+        <div class="chat-panel">
+            <div class="chat-header">Socratic Dialogue</div>
+            <div class="chat-messages" id="chat-messages">
+                <div class="message system">
+                    Welcome to PARAGON Mission Control. Ask questions about your graph or request actions.
+                </div>
+            </div>
+            <div class="chat-input-container">
+                <textarea
+                    class="chat-input"
+                    id="chat-input"
+                    rows="2"
+                    placeholder="Ask a question or enter a command..."
+                ></textarea>
+            </div>
+        </div>
+
+        <!-- Metrics Panel -->
+        <div class="metrics-panel">
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <div class="metric-title">Requirements</div>
+                    <div class="metric-value info" id="req-count">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Specifications</div>
+                    <div class="metric-value warning" id="spec-count">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Code Nodes</div>
+                    <div class="metric-value success" id="code-count">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Test Nodes</div>
+                    <div class="metric-value" id="test-count">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Pending</div>
+                    <div class="metric-value warning" id="pending-count">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-title">Failed</div>
+                    <div class="metric-value error" id="failed-count">0</div>
+                </div>
+            </div>
+
+            <div class="legend">
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #E63946;"></span>
+                    <span>REQ</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #F4A261;"></span>
+                    <span>SPEC</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #2A9D8F;"></span>
+                    <span>CODE</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #264653;"></span>
+                    <span>TEST</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #A8DADC;"></span>
+                    <span>RESEARCH</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-color" style="background: #457B9D;"></span>
+                    <span>DOC</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cosmograph library (CDN) -->
+    <script src="https://unpkg.com/@cosmograph/cosmograph@latest/dist/cosmograph.umd.min.js"></script>
+
+    <script>
+        // Configuration
+        const API_BASE = window.location.origin;
+        const WS_URL = `ws://${window.location.host}/api/viz/ws`;
+
+        // State
+        let ws = null;
+        let cosmograph = null;
+        let currentColorMode = 'type';
+        let graphData = { nodes: [], edges: [] };
+
+        // Initialize Cosmograph
+        function initCosmograph() {
+            const container = document.getElementById('graph-canvas');
+
+            cosmograph = new Cosmograph.Cosmograph(container, {
+                nodeColor: (node) => node.color,
+                nodeSize: (node) => 4 + (node.is_root ? 2 : 0) + (node.is_leaf ? 1 : 0),
+                linkColor: (link) => link.color,
+                linkWidth: (link) => link.weight * 0.5,
+                linkArrows: true,
+                backgroundColor: '#0d1117',
+                spaceSize: 4096,
+                simulation: {
+                    linkDistance: 30,
+                    linkSpring: 0.5,
+                    repulsion: 0.5,
+                    gravity: 0.1,
+                },
+                events: {
+                    onClick: (node) => {
+                        if (node) {
+                            addMessage('system', `Selected: ${node.label} (${node.type}, ${node.status})`);
+                        }
+                    }
+                }
+            });
+        }
+
+        // WebSocket connection
+        function connectWebSocket() {
+            ws = new WebSocket(WS_URL);
+
+            ws.onopen = () => {
+                updateConnectionStatus(true);
+                addMessage('system', 'Connected to PARAGON server.');
+            };
+
+            ws.onclose = () => {
+                updateConnectionStatus(false);
+                addMessage('error', 'Disconnected. Attempting to reconnect...');
+                setTimeout(connectWebSocket, 3000);
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onmessage = (event) => {
+                const message = JSON.parse(event.data);
+                handleServerMessage(message);
+            };
+        }
+
+        function handleServerMessage(message) {
+            switch (message.type) {
+                case 'snapshot':
+                    handleSnapshot(message.data);
+                    break;
+                case 'delta':
+                    handleDelta(message.data);
+                    break;
+                case 'heartbeat':
+                    // Keep-alive, no action needed
+                    break;
+                case 'pong':
+                    // Response to ping
+                    break;
+            }
+        }
+
+        function handleSnapshot(data) {
+            graphData = {
+                nodes: data.nodes,
+                edges: data.edges.map(e => ({
+                    source: e.source,
+                    target: e.target,
+                    color: e.color,
+                    weight: e.weight
+                }))
+            };
+
+            if (cosmograph) {
+                cosmograph.setData(graphData.nodes, graphData.edges);
+            }
+
+            updateStats(data);
+            updateMetrics(data.nodes);
+        }
+
+        function handleDelta(delta) {
+            // Apply delta updates
+            if (delta.nodes_added.length > 0) {
+                graphData.nodes.push(...delta.nodes_added);
+            }
+
+            if (delta.nodes_removed.length > 0) {
+                const removeSet = new Set(delta.nodes_removed);
+                graphData.nodes = graphData.nodes.filter(n => !removeSet.has(n.id));
+            }
+
+            if (delta.nodes_updated.length > 0) {
+                const updateMap = new Map(delta.nodes_updated.map(n => [n.id, n]));
+                graphData.nodes = graphData.nodes.map(n => updateMap.get(n.id) || n);
+            }
+
+            if (delta.edges_added.length > 0) {
+                graphData.edges.push(...delta.edges_added.map(e => ({
+                    source: e.source,
+                    target: e.target,
+                    color: e.color,
+                    weight: e.weight
+                })));
+            }
+
+            if (delta.edges_removed.length > 0) {
+                const removeSet = new Set(delta.edges_removed.map(e => `${e[0]}-${e[1]}`));
+                graphData.edges = graphData.edges.filter(e =>
+                    !removeSet.has(`${e.source}-${e.target}`)
+                );
+            }
+
+            if (cosmograph) {
+                cosmograph.setData(graphData.nodes, graphData.edges);
+            }
+
+            updateMetrics(graphData.nodes);
+        }
+
+        function updateConnectionStatus(connected) {
+            const el = document.getElementById('connection-status');
+            const text = document.getElementById('status-text');
+
+            if (connected) {
+                el.classList.remove('disconnected');
+                el.classList.add('connected');
+                text.textContent = 'Connected';
+            } else {
+                el.classList.remove('connected');
+                el.classList.add('disconnected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        function updateStats(data) {
+            document.getElementById('node-count').textContent = data.node_count;
+            document.getElementById('edge-count').textContent = data.edge_count;
+            document.getElementById('layer-count').textContent = data.layer_count;
+
+            const verified = data.nodes.filter(n => n.status === 'VERIFIED').length;
+            document.getElementById('verified-count').textContent = verified;
+        }
+
+        function updateMetrics(nodes) {
+            const counts = {
+                REQ: 0, SPEC: 0, CODE: 0, TEST: 0,
+                PENDING: 0, FAILED: 0
+            };
+
+            nodes.forEach(node => {
+                if (counts.hasOwnProperty(node.type)) {
+                    counts[node.type]++;
+                }
+                if (node.status === 'PENDING') counts.PENDING++;
+                if (node.status === 'FAILED') counts.FAILED++;
+            });
+
+            document.getElementById('req-count').textContent = counts.REQ;
+            document.getElementById('spec-count').textContent = counts.SPEC;
+            document.getElementById('code-count').textContent = counts.CODE;
+            document.getElementById('test-count').textContent = counts.TEST;
+            document.getElementById('pending-count').textContent = counts.PENDING;
+            document.getElementById('failed-count').textContent = counts.FAILED;
+        }
+
+        // Chat functions
+        function addMessage(type, text) {
+            const container = document.getElementById('chat-messages');
+            const msg = document.createElement('div');
+            msg.className = `message ${type}`;
+            msg.textContent = text;
+            container.appendChild(msg);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // Event handlers
+        document.getElementById('chat-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                const input = e.target;
+                const text = input.value.trim();
+
+                if (text) {
+                    addMessage('user', text);
+                    input.value = '';
+
+                    // Handle commands
+                    if (text.startsWith('/')) {
+                        handleCommand(text);
+                    } else {
+                        // Echo for now - would integrate with Socratic Engine
+                        addMessage('system', 'Processing your query...');
+                    }
+                }
+            }
+        });
+
+        function handleCommand(cmd) {
+            const parts = cmd.split(' ');
+            const command = parts[0].toLowerCase();
+
+            switch (command) {
+                case '/stats':
+                    addMessage('system', `Nodes: ${graphData.nodes.length}, Edges: ${graphData.edges.length}`);
+                    break;
+                case '/refresh':
+                    refreshGraph();
+                    break;
+                case '/snapshot':
+                    saveSnapshot(parts[1] || 'manual');
+                    break;
+                default:
+                    addMessage('error', `Unknown command: ${command}`);
+            }
+        }
+
+        function refreshGraph() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ping' }));
+                addMessage('system', 'Refreshing graph data...');
+            }
+        }
+
+        async function saveSnapshot(version) {
+            try {
+                const response = await fetch(`${API_BASE}/api/viz/snapshots`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ version, label: `Snapshot at ${new Date().toISOString()}` })
+                });
+                const data = await response.json();
+                addMessage('system', `Snapshot saved: ${version} (${data.node_count} nodes)`);
+            } catch (e) {
+                addMessage('error', `Failed to save snapshot: ${e.message}`);
+            }
+        }
+
+        // Color mode toggle
+        document.getElementById('color-type').addEventListener('click', () => {
+            currentColorMode = 'type';
+            document.getElementById('color-type').classList.add('active');
+            document.getElementById('color-status').classList.remove('active');
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'color_mode', mode: 'type' }));
+            }
+        });
+
+        document.getElementById('color-status').addEventListener('click', () => {
+            currentColorMode = 'status';
+            document.getElementById('color-status').classList.add('active');
+            document.getElementById('color-type').classList.remove('active');
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'color_mode', mode: 'status' }));
+            }
+        });
+
+        document.getElementById('refresh-btn').addEventListener('click', refreshGraph);
+        document.getElementById('snapshot-btn').addEventListener('click', () => {
+            const version = `snapshot-${Date.now()}`;
+            saveSnapshot(version);
+        });
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            initCosmograph();
+            connectWebSocket();
+        });
+    </script>
+</body>
+</html>

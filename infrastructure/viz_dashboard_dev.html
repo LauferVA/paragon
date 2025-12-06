@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PARAGON Development View - Graph Comparison</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border-color: #30363d;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-red: #f85149;
+            --accent-orange: #d29922;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .container {
+            display: grid;
+            grid-template-rows: 60px 1fr 300px;
+            height: 100vh;
+        }
+
+        /* Header */
+        .header {
+            background: var(--bg-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 20px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .logo {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--accent-blue);
+        }
+
+        .logo span {
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+
+        .snapshot-selectors {
+            display: flex;
+            gap: 24px;
+            align-items: center;
+        }
+
+        .selector-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .selector-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        select {
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 0.875rem;
+            min-width: 150px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+
+        .btn:hover {
+            background: var(--border-color);
+        }
+
+        .btn-primary {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+            color: #fff;
+        }
+
+        /* Split View */
+        .split-view {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1px;
+            background: var(--border-color);
+        }
+
+        .graph-pane {
+            background: var(--bg-primary);
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .pane-header {
+            padding: 12px 16px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .pane-title {
+            font-weight: 600;
+            font-size: 0.875rem;
+        }
+
+        .pane-title.baseline {
+            color: var(--accent-orange);
+        }
+
+        .pane-title.treatment {
+            color: var(--accent-green);
+        }
+
+        .pane-stats {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .graph-canvas {
+            flex: 1;
+        }
+
+        /* Comparison Panel */
+        .comparison-panel {
+            background: var(--bg-secondary);
+            overflow-y: auto;
+            padding: 20px;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .comparison-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .comparison-title {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .comparison-summary {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+        }
+
+        .metric-group {
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            padding: 16px;
+            border: 1px solid var(--border-color);
+        }
+
+        .metric-group-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+        }
+
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 4px 0;
+            font-size: 0.875rem;
+        }
+
+        .metric-name {
+            color: var(--text-secondary);
+        }
+
+        .metric-values {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .metric-baseline {
+            color: var(--accent-orange);
+            min-width: 40px;
+            text-align: right;
+        }
+
+        .metric-treatment {
+            color: var(--accent-green);
+            min-width: 40px;
+            text-align: right;
+        }
+
+        .metric-delta {
+            min-width: 50px;
+            text-align: right;
+            font-weight: 600;
+        }
+
+        .metric-delta.positive {
+            color: var(--accent-green);
+        }
+
+        .metric-delta.negative {
+            color: var(--accent-red);
+        }
+
+        .metric-delta.neutral {
+            color: var(--text-secondary);
+        }
+
+        /* Changes list */
+        .changes-list {
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        .change-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            margin-bottom: 4px;
+        }
+
+        .change-item.added {
+            background: rgba(63, 185, 80, 0.1);
+            color: var(--accent-green);
+        }
+
+        .change-item.removed {
+            background: rgba(248, 81, 73, 0.1);
+            color: var(--accent-red);
+        }
+
+        .change-badge {
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.625rem;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .change-badge.added {
+            background: var(--accent-green);
+            color: #fff;
+        }
+
+        .change-badge.removed {
+            background: var(--accent-red);
+            color: #fff;
+        }
+
+        /* Empty state */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-secondary);
+        }
+
+        .empty-state svg {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">PARAGON <span>Development View</span></div>
+
+            <div class="snapshot-selectors">
+                <div class="selector-group">
+                    <span class="selector-label">Baseline:</span>
+                    <select id="baseline-select">
+                        <option value="">Select snapshot...</option>
+                    </select>
+                </div>
+                <div class="selector-group">
+                    <span class="selector-label">Treatment:</span>
+                    <select id="treatment-select">
+                        <option value="current">Current</option>
+                    </select>
+                </div>
+                <button class="btn btn-primary" id="compare-btn">Compare</button>
+                <button class="btn" id="refresh-btn">Refresh Snapshots</button>
+            </div>
+        </header>
+
+        <!-- Split View -->
+        <div class="split-view">
+            <!-- Baseline Pane -->
+            <div class="graph-pane">
+                <div class="pane-header">
+                    <span class="pane-title baseline">Baseline</span>
+                    <span class="pane-stats" id="baseline-stats">No snapshot selected</span>
+                </div>
+                <div class="graph-canvas" id="baseline-canvas">
+                    <div class="empty-state">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M20 12a8 8 0 11-16 0 8 8 0 0116 0z"/>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3"/>
+                        </svg>
+                        <p>Select a baseline snapshot</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Treatment Pane -->
+            <div class="graph-pane">
+                <div class="pane-header">
+                    <span class="pane-title treatment">Treatment</span>
+                    <span class="pane-stats" id="treatment-stats">No snapshot selected</span>
+                </div>
+                <div class="graph-canvas" id="treatment-canvas">
+                    <div class="empty-state">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                        </svg>
+                        <p>Select treatment or use current graph</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Comparison Panel -->
+        <div class="comparison-panel">
+            <div class="comparison-header">
+                <div>
+                    <div class="comparison-title">Comparison Results</div>
+                    <div class="comparison-summary" id="comparison-summary">Select snapshots and click Compare</div>
+                </div>
+            </div>
+
+            <div class="metrics-grid" id="metrics-grid">
+                <!-- Node Counts -->
+                <div class="metric-group">
+                    <div class="metric-group-title">Node Counts by Type</div>
+                    <div id="node-type-metrics">
+                        <div class="metric-row">
+                            <span class="metric-name">No data yet</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Status Counts -->
+                <div class="metric-group">
+                    <div class="metric-group-title">Node Status</div>
+                    <div id="status-metrics">
+                        <div class="metric-row">
+                            <span class="metric-name">No data yet</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Edge Counts -->
+                <div class="metric-group">
+                    <div class="metric-group-title">Edge Counts by Type</div>
+                    <div id="edge-type-metrics">
+                        <div class="metric-row">
+                            <span class="metric-name">No data yet</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Structural Changes -->
+                <div class="metric-group">
+                    <div class="metric-group-title">Structural Changes</div>
+                    <div class="changes-list" id="changes-list">
+                        <div class="metric-row">
+                            <span class="metric-name">No changes detected</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- D3.js for visualization -->
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+
+    <script>
+        const API_BASE = window.location.origin;
+
+        // State
+        let baselineData = null;
+        let treatmentData = null;
+        let baselineSimulation = null;
+        let treatmentSimulation = null;
+
+        // Load available snapshots
+        async function loadSnapshots() {
+            try {
+                const response = await fetch(`${API_BASE}/api/viz/snapshots`);
+                const data = await response.json();
+
+                const baselineSelect = document.getElementById('baseline-select');
+                const treatmentSelect = document.getElementById('treatment-select');
+
+                // Clear existing options (except first)
+                baselineSelect.innerHTML = '<option value="">Select snapshot...</option>';
+                treatmentSelect.innerHTML = '<option value="current">Current</option>';
+
+                data.snapshots.forEach(snapshot => {
+                    const option = document.createElement('option');
+                    option.value = snapshot.version;
+                    option.textContent = `${snapshot.version} (${snapshot.node_count} nodes)`;
+
+                    baselineSelect.appendChild(option.cloneNode(true));
+                    treatmentSelect.appendChild(option);
+                });
+            } catch (e) {
+                console.error('Failed to load snapshots:', e);
+            }
+        }
+
+        // Load a snapshot
+        async function loadSnapshot(version) {
+            try {
+                const url = version === 'current'
+                    ? `${API_BASE}/api/viz/snapshot`
+                    : `${API_BASE}/api/viz/snapshot?version=${version}`;
+
+                const response = await fetch(url);
+                return await response.json();
+            } catch (e) {
+                console.error('Failed to load snapshot:', e);
+                return null;
+            }
+        }
+
+        // Compare snapshots
+        async function compareSnapshots() {
+            const baselineVersion = document.getElementById('baseline-select').value;
+            const treatmentVersion = document.getElementById('treatment-select').value;
+
+            if (!baselineVersion) {
+                alert('Please select a baseline snapshot');
+                return;
+            }
+
+            try {
+                const response = await fetch(
+                    `${API_BASE}/api/viz/compare?baseline=${baselineVersion}&treatment=${treatmentVersion}`
+                );
+                const comparison = await response.json();
+
+                if (comparison.error) {
+                    alert(comparison.error);
+                    return;
+                }
+
+                baselineData = comparison.baseline;
+                treatmentData = comparison.treatment;
+
+                renderGraph('baseline-canvas', baselineData, '#d29922');
+                renderGraph('treatment-canvas', treatmentData, '#3fb950');
+                renderComparison(comparison);
+
+                document.getElementById('baseline-stats').textContent =
+                    `${baselineData.node_count} nodes, ${baselineData.edge_count} edges`;
+                document.getElementById('treatment-stats').textContent =
+                    `${treatmentData.node_count} nodes, ${treatmentData.edge_count} edges`;
+            } catch (e) {
+                console.error('Comparison failed:', e);
+                alert('Failed to compare snapshots');
+            }
+        }
+
+        // Render graph with D3
+        function renderGraph(containerId, data, accentColor) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+
+            const svg = d3.select(`#${containerId}`)
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+
+            // Create links
+            const links = data.edges.map(e => ({
+                source: e.source,
+                target: e.target,
+                color: e.color
+            }));
+
+            // Create nodes map for lookup
+            const nodeMap = new Map(data.nodes.map(n => [n.id, n]));
+
+            const simulation = d3.forceSimulation(data.nodes)
+                .force('link', d3.forceLink(links).id(d => d.id).distance(50))
+                .force('charge', d3.forceManyBody().strength(-100))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(15));
+
+            // Draw links
+            const link = svg.append('g')
+                .selectAll('line')
+                .data(links)
+                .join('line')
+                .attr('stroke', d => d.color || '#30363d')
+                .attr('stroke-opacity', 0.6)
+                .attr('stroke-width', 1);
+
+            // Draw nodes
+            const node = svg.append('g')
+                .selectAll('circle')
+                .data(data.nodes)
+                .join('circle')
+                .attr('r', 6)
+                .attr('fill', d => d.color || accentColor)
+                .attr('stroke', '#0d1117')
+                .attr('stroke-width', 1.5)
+                .call(drag(simulation));
+
+            // Node labels
+            const label = svg.append('g')
+                .selectAll('text')
+                .data(data.nodes)
+                .join('text')
+                .text(d => d.label)
+                .attr('font-size', '8px')
+                .attr('fill', '#8b949e')
+                .attr('dx', 10)
+                .attr('dy', 3);
+
+            simulation.on('tick', () => {
+                link
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+
+                node
+                    .attr('cx', d => d.x)
+                    .attr('cy', d => d.y);
+
+                label
+                    .attr('x', d => d.x)
+                    .attr('y', d => d.y);
+            });
+        }
+
+        // Drag behavior
+        function drag(simulation) {
+            function dragstarted(event) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                event.subject.fx = event.subject.x;
+                event.subject.fy = event.subject.y;
+            }
+
+            function dragged(event) {
+                event.subject.fx = event.x;
+                event.subject.fy = event.y;
+            }
+
+            function dragended(event) {
+                if (!event.active) simulation.alphaTarget(0);
+                event.subject.fx = null;
+                event.subject.fy = null;
+            }
+
+            return d3.drag()
+                .on('start', dragstarted)
+                .on('drag', dragged)
+                .on('end', dragended);
+        }
+
+        // Render comparison metrics
+        function renderComparison(comparison) {
+            const summary = document.getElementById('comparison-summary');
+            summary.textContent = `Delta: ${formatDelta(comparison.node_count_delta)} nodes, ${formatDelta(comparison.edge_count_delta)} edges`;
+
+            // Node type metrics
+            renderMetricGroup('node-type-metrics', comparison.type_deltas,
+                countByKey(comparison.baseline.nodes, 'type'),
+                countByKey(comparison.treatment.nodes, 'type')
+            );
+
+            // Status metrics
+            renderMetricGroup('status-metrics', comparison.status_deltas,
+                countByKey(comparison.baseline.nodes, 'status'),
+                countByKey(comparison.treatment.nodes, 'status')
+            );
+
+            // Edge type metrics
+            renderMetricGroup('edge-type-metrics', comparison.edge_type_deltas,
+                countByKey(comparison.baseline.edges, 'type'),
+                countByKey(comparison.treatment.edges, 'type')
+            );
+
+            // Changes list
+            renderChanges(comparison);
+        }
+
+        function countByKey(items, key) {
+            const counts = {};
+            items.forEach(item => {
+                const val = item[key];
+                counts[val] = (counts[val] || 0) + 1;
+            });
+            return counts;
+        }
+
+        function renderMetricGroup(containerId, deltas, baselineCounts, treatmentCounts) {
+            const container = document.getElementById(containerId);
+            const allKeys = new Set([...Object.keys(baselineCounts), ...Object.keys(treatmentCounts)]);
+
+            let html = '';
+            allKeys.forEach(key => {
+                const baseline = baselineCounts[key] || 0;
+                const treatment = treatmentCounts[key] || 0;
+                const delta = treatment - baseline;
+                const deltaClass = delta > 0 ? 'positive' : (delta < 0 ? 'negative' : 'neutral');
+
+                html += `
+                    <div class="metric-row">
+                        <span class="metric-name">${key}</span>
+                        <span class="metric-values">
+                            <span class="metric-baseline">${baseline}</span>
+                            <span class="metric-treatment">${treatment}</span>
+                            <span class="metric-delta ${deltaClass}">${formatDelta(delta)}</span>
+                        </span>
+                    </div>
+                `;
+            });
+
+            container.innerHTML = html || '<div class="metric-row"><span class="metric-name">No data</span></div>';
+        }
+
+        function renderChanges(comparison) {
+            const container = document.getElementById('changes-list');
+
+            let html = '';
+
+            comparison.nodes_only_in_treatment.slice(0, 10).forEach(id => {
+                html += `
+                    <div class="change-item added">
+                        <span class="change-badge added">Added</span>
+                        <span>${id.substring(0, 12)}...</span>
+                    </div>
+                `;
+            });
+
+            comparison.nodes_only_in_baseline.slice(0, 10).forEach(id => {
+                html += `
+                    <div class="change-item removed">
+                        <span class="change-badge removed">Removed</span>
+                        <span>${id.substring(0, 12)}...</span>
+                    </div>
+                `;
+            });
+
+            if (comparison.nodes_only_in_treatment.length > 10) {
+                html += `<div class="change-item added">... and ${comparison.nodes_only_in_treatment.length - 10} more added</div>`;
+            }
+
+            if (comparison.nodes_only_in_baseline.length > 10) {
+                html += `<div class="change-item removed">... and ${comparison.nodes_only_in_baseline.length - 10} more removed</div>`;
+            }
+
+            container.innerHTML = html || '<div class="metric-row"><span class="metric-name">No structural changes</span></div>';
+        }
+
+        function formatDelta(delta) {
+            if (delta > 0) return `+${delta}`;
+            return delta.toString();
+        }
+
+        // Event listeners
+        document.getElementById('compare-btn').addEventListener('click', compareSnapshots);
+        document.getElementById('refresh-btn').addEventListener('click', loadSnapshots);
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', loadSnapshots);
+    </script>
+</body>
+</html>
