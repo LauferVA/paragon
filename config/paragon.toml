@@ -1,0 +1,125 @@
+# =============================================================================
+# PARAGON CONFIGURATION
+# =============================================================================
+# This file contains all runtime configuration for the Paragon platform.
+# All thresholds, paths, and limits are defined here - no hardcoding in code.
+#
+# Schema: msgspec-compatible (parsed via tomllib + msgspec validation)
+# =============================================================================
+
+[system]
+# Logging configuration
+log_level = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# Parallelism settings (for Granian workers and Polars operations)
+max_workers = 4
+
+# Workspace directory for session outputs
+workspace_path = "./workspace"
+
+# =============================================================================
+# GRAPH DATABASE CONFIGURATION
+# =============================================================================
+
+[graph]
+# Backend engine (only rustworkx supported in v2.1)
+backend = "rustworkx"
+
+# Checkpoint frequency (steps between state persistence)
+checkpoint_interval = 50
+
+# Persistence storage path (Polars-friendly format)
+storage_path = "./data/graph_state.parquet"
+
+# Maximum nodes before warning (memory management)
+max_nodes_warning = 100000
+
+# Wave computation settings
+wave_batch_size = 1000  # Max nodes per wave for parallel execution
+
+# =============================================================================
+# AGENT CONFIGURATION
+# =============================================================================
+
+[agents]
+# Default timeout for agent operations (seconds)
+timeout_seconds = 30
+
+# Maximum recursion depth for agent reasoning loops
+max_recursion_limit = 25
+
+# Default cost limit per agent invocation (USD)
+default_cost_limit = 1.00
+
+# Default retry attempts before escalation
+default_max_attempts = 3
+
+# Rate limiting (Anthropic API ~50 RPM)
+rate_limit_rpm = 50
+rate_limit_burst = 10
+
+# =============================================================================
+# LLM PROVIDER CONFIGURATION
+# =============================================================================
+
+[llm]
+# Default provider (anthropic, openai, local, manual)
+default_provider = "anthropic"
+
+# Model tier assignments
+[llm.models]
+heavy = "claude-sonnet-4-20250514"
+standard = "claude-3-5-haiku-20241022"
+light = "claude-3-5-haiku-20241022"
+
+# =============================================================================
+# ALIGNMENT ENGINE CONFIGURATION
+# =============================================================================
+
+[alignment]
+# pygmtools algorithm selection
+algorithm = "rrwm"  # Reweighted Random Walk Matching
+
+# Minimum alignment score to consider a match
+min_score_threshold = 0.7
+
+# =============================================================================
+# CODE PARSER CONFIGURATION
+# =============================================================================
+
+[parser]
+# Tree-sitter configuration
+default_language = "python"
+
+# Supported languages (must have tree-sitter grammar installed)
+supported_languages = ["python", "javascript", "typescript", "rust", "go"]
+
+# =============================================================================
+# API SERVER CONFIGURATION
+# =============================================================================
+
+[server]
+# Granian server settings
+host = "0.0.0.0"
+port = 8000
+
+# Threading mode for Granian
+# "runtime" uses Rust async runtime (recommended for graph operations)
+threading_mode = "runtime"
+
+# CORS settings
+cors_origins = ["*"]
+
+# =============================================================================
+# TELEMETRY CONFIGURATION
+# =============================================================================
+
+[telemetry]
+# Enable/disable telemetry
+enabled = true
+
+# Telemetry backend (console, file, otlp)
+backend = "console"
+
+# Metrics collection interval (seconds)
+metrics_interval = 10
