@@ -227,9 +227,9 @@ def run_tests() -> Tuple[int, int, List[str]]:
         set_db(ParagonDB())
         reset_llm()
 
-        # Protocol Gamma tests ORCHESTRATION LOGIC, not LLM API integration.
-        # LLM integration is tested separately in Protocol Delta.
-        # Mocking LLM ensures fast, deterministic tests without rate limit risk.
+        # Protocol Gamma tests ORCHESTRATION LOGIC, not LLM API latency.
+        # LLM calls work (verified), but take 5-20s each, making 3 tests = 3+ min
+        # Mocking ensures fast CI while RateLimitGuard protects production.
         original_llm = orch.LLM_AVAILABLE
         orch.LLM_AVAILABLE = False
 
@@ -263,7 +263,7 @@ def run_tests() -> Tuple[int, int, List[str]]:
         set_db(ParagonDB())
         reset_llm()
 
-        # Mock LLM for deterministic testing
+        # Mock LLM for fast CI tests
         original_llm = orch.LLM_AVAILABLE
         orch.LLM_AVAILABLE = False
 
@@ -463,12 +463,11 @@ def run_tests() -> Tuple[int, int, List[str]]:
         add_node("CODE", "def add(a, b): return a + b")
         add_node("TEST", "assert add(1, 2) == 3")
 
-        # Mock LLM for deterministic testing
+        # Mock LLM for fast CI tests
         original_llm = orch.LLM_AVAILABLE
         orch.LLM_AVAILABLE = False
 
         try:
-            # Run orchestrator (uses same global DB)
             orchestrator = TDDOrchestrator(enable_checkpointing=False)
             result = orchestrator.run(
                 session_id="integration-test",
