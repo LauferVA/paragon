@@ -985,6 +985,7 @@ def add_node_safe(
     data: Annotated[Optional[Dict[str, Any]], "Additional metadata"] = None,
     created_by: Annotated[str, "Creator identifier"] = "agent",
     check_alignment: Annotated[bool, "Whether to check alignment with spec"] = True,
+    signature: Annotated[Optional[Any], "Agent signature for audit trail (AgentSignature)"] = None,
 ) -> SafeNodeResult:
     """
     Add a node to the graph with Layer 7B auditor checks.
@@ -1003,9 +1004,14 @@ def add_node_safe(
         data: Optional metadata dictionary
         created_by: Who/what created this node
         check_alignment: Whether to verify alignment with spec
+        signature: Optional AgentSignature for audit trail (recommended in production)
 
     Returns:
         SafeNodeResult with success status and validation details
+
+    Note:
+        If signature is provided, it will be stored in the node's metadata
+        under the key '_signature_chain' as a SignatureChain object.
     """
     db = get_db()
     violations = []
@@ -1031,12 +1037,35 @@ def add_node_safe(
 
     # Step 2: Create the node (but don't add yet for CODE with spec)
     try:
+        # Prepare node data with signature chain if provided
+        node_data = data or {}
+        if signature is not None:
+            # Import here to avoid circular dependency
+            from agents.schemas import SignatureChain
+            import uuid
+
+            # Create a new signature chain for this node
+            # Note: node_id will be set after NodeData.create()
+            signature_chain = SignatureChain(
+                node_id="",  # Will be updated after node creation
+                state_id=str(uuid.uuid4()),
+                signatures=[signature],
+                is_replacement=False,
+                replaced_node_id=None
+            )
+            # Store as dict for compatibility with msgspec
+            node_data["_signature_chain"] = msgspec.structs.asdict(signature_chain)
+
         node = NodeData.create(
             type=node_type,
             content=content,
-            data=data or {},
+            data=node_data,
             created_by=created_by,
         )
+
+        # Update signature chain with actual node_id if it was created
+        if signature is not None and "_signature_chain" in node.data:
+            node.data["_signature_chain"]["node_id"] = node.id
 
         # Step 3: Pre-flight topology check
         # For this, we'd need to temporarily add the node, which is complex

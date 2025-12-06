@@ -126,6 +126,8 @@ class VizNode(msgspec.Struct, kw_only=True):
         layer: int = 0,
         is_root: bool = False,
         is_leaf: bool = False,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
     ) -> "VizNode":
         """Create VizNode from NodeData."""
         # Determine color based on mode
@@ -151,6 +153,8 @@ class VizNode(msgspec.Struct, kw_only=True):
             layer=layer,
             is_root=is_root,
             is_leaf=is_leaf,
+            x=x,
+            y=y,
         )
 
 
@@ -233,7 +237,7 @@ class GraphDelta(msgspec.Struct, kw_only=True):
     nodes_updated: List[VizNode] = msgspec.field(default_factory=list)
     nodes_removed: List[str] = msgspec.field(default_factory=list)  # IDs only
     edges_added: List[VizEdge] = msgspec.field(default_factory=list)
-    edges_removed: List[Tuple[str, str]] = msgspec.field(default_factory=list)  # (source, target) pairs
+    edges_removed: List[Dict[str, str]] = msgspec.field(default_factory=list)  # [{"source": "id1", "target": "id2"}]
 
     def is_empty(self) -> bool:
         """Check if delta contains any changes."""
@@ -371,7 +375,7 @@ class VizGraph:
         updated_nodes: List[VizNode] = None,
         removed_node_ids: List[str] = None,
         added_edges: List[VizEdge] = None,
-        removed_edges: List[Tuple[str, str]] = None,
+        removed_edges: List[Dict[str, str]] = None,
     ) -> GraphDelta:
         """Create a delta for incremental update."""
         self._sequence += 1
@@ -474,15 +478,29 @@ def create_snapshot_from_db(
     root_ids = {n.id for n in db.get_root_nodes()}
     leaf_ids = {n.id for n in db.get_leaf_nodes()}
 
-    # Convert to VizNodes
+    # Convert to VizNodes with position hints
     viz_nodes = []
+    layer_counts = {}  # Track node count per layer for positioning
     for node in all_nodes:
+        layer_idx = layer_map.get(node.id, 0)
+
+        # Simple hierarchical layout: y based on layer, x based on position within layer
+        # Cosmograph will refine this, but hints help with initial render
+        layer_counts[layer_idx] = layer_counts.get(layer_idx, 0) + 1
+        node_position_in_layer = layer_counts[layer_idx] - 1
+
+        # Layout hints: spread nodes horizontally within each layer
+        y_pos = float(layer_idx * 100)  # 100 units between layers
+        x_pos = float(node_position_in_layer * 80)  # 80 units between nodes
+
         viz_node = VizNode.from_node_data(
             node,
             color_mode=color_mode,
-            layer=layer_map.get(node.id, 0),
+            layer=layer_idx,
             is_root=node.id in root_ids,
             is_leaf=node.id in leaf_ids,
+            x=x_pos,
+            y=y_pos,
         )
         viz_nodes.append(viz_node)
 

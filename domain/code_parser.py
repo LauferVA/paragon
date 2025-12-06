@@ -14,6 +14,11 @@ Architecture:
 - S-Expression queries extract classes, functions, imports
 - Output is NodeData/EdgeData ready for graph ingestion
 
+Supported Languages:
+- Python (.py)
+- TypeScript (.ts)
+- TSX/React (.tsx)
+
 Query Pattern:
     tree-sitter uses S-expressions to match AST patterns.
     Example: (function_definition name: (identifier) @func_name)
@@ -25,6 +30,7 @@ API Note (tree-sitter 0.25.x):
     captures = cursor.captures(tree.root_node)  # Returns dict[str, list[Node]]
 """
 import tree_sitter_python as tspython
+import tree_sitter_typescript as tstypescript
 from tree_sitter import Language, Parser, Query, QueryCursor, Tree, Node
 from typing import List, Dict, Tuple, Optional, Set
 from pathlib import Path
@@ -38,8 +44,18 @@ from core.ontology import NodeType, EdgeType, NodeStatus
 # LANGUAGE SETUP
 # =============================================================================
 
-# Initialize Python language
+# Initialize languages
 PY_LANGUAGE = Language(tspython.language())
+TS_LANGUAGE = Language(tstypescript.language_typescript())
+TSX_LANGUAGE = Language(tstypescript.language_tsx())
+
+# Language registry for file extension mapping
+LANGUAGE_REGISTRY = {
+    ".py": ("python", PY_LANGUAGE),
+    ".ts": ("typescript", TS_LANGUAGE),
+    ".tsx": ("tsx", TSX_LANGUAGE),
+    ".jsx": ("tsx", TSX_LANGUAGE),  # JSX uses TSX parser
+}
 
 # Pre-compiled queries for Python (S-expressions)
 # These are the patterns we extract from source code
@@ -103,6 +119,129 @@ PYTHON_QUERIES = {
 }
 
 
+# TypeScript/TSX queries
+TYPESCRIPT_QUERIES = {
+    "classes": """
+        (class_declaration
+            name: (type_identifier) @class_name
+            body: (class_body) @class_body
+        ) @class_def
+    """,
+
+    "functions": """
+        [
+            (function_declaration
+                name: (identifier) @func_name
+                parameters: (formal_parameters) @func_params
+                body: (statement_block) @func_body
+            ) @func_def
+            (lexical_declaration
+                (variable_declarator
+                    name: (identifier) @func_name
+                    value: (arrow_function
+                        parameters: (formal_parameters) @func_params
+                        body: (_) @func_body
+                    )
+                )
+            ) @func_def
+        ]
+    """,
+
+    "methods": """
+        (class_declaration
+            name: (type_identifier) @class_name
+            body: (class_body
+                (method_definition
+                    name: (property_identifier) @method_name
+                ) @method_def
+            )
+        )
+    """,
+
+    "imports": """
+        [
+            (import_statement
+                source: (string) @import_source
+            )
+            (import_statement
+                (import_clause
+                    (named_imports
+                        (import_specifier
+                            name: (identifier) @import_name
+                        )
+                    )
+                )
+                source: (string) @import_source
+            )
+            (import_statement
+                (import_clause
+                    (identifier) @import_name
+                )
+                source: (string) @import_source
+            )
+        ]
+    """,
+
+    "interfaces": """
+        (interface_declaration
+            name: (type_identifier) @interface_name
+            body: (interface_body) @interface_body
+        ) @interface_def
+    """,
+
+    "types": """
+        (type_alias_declaration
+            name: (type_identifier) @type_name
+            value: (_) @type_value
+        ) @type_def
+    """,
+
+    "react_components": """
+        [
+            (function_declaration
+                name: (identifier) @component_name
+                return_type: (type_annotation
+                    (generic_type
+                        name: (type_identifier) @return_type
+                    )
+                )?
+                body: (statement_block) @component_body
+            ) @component_def
+            (lexical_declaration
+                (variable_declarator
+                    name: (identifier) @component_name
+                    type: (type_annotation)?
+                    value: (arrow_function) @component_body
+                )
+            ) @component_def
+        ]
+    """,
+
+    "jsx_elements": """
+        (jsx_element
+            open_tag: (jsx_opening_element
+                name: (_) @jsx_tag_name
+            )
+        ) @jsx_element
+    """,
+
+    "exports": """
+        [
+            (export_statement
+                declaration: (_) @export_decl
+            ) @export_def
+            (export_statement
+                (export_clause
+                    (export_specifier
+                        name: (identifier) @export_name
+                    )
+                )
+            ) @export_def
+        ]
+    """,
+}
+
+
 # =============================================================================
 # DATA STRUCTURES
 # =============================================================================
@@ -138,39 +277,68 @@ class CodeParser:
     - Function/method definitions
     - Import statements
     - Function calls (for call graph)
+    - TypeScript interfaces and types
+    - React/JSX components
+
+    Supported Languages:
+    - python (.py)
+    - typescript (.ts)
+    - tsx (.tsx, .jsx)
 
     Usage:
-        parser = CodeParser()
+        parser = CodeParser()  # Default: Python
 
-        # Parse a file
+        # Parse a file (auto-detects language from extension)
         nodes, edges = parser.parse_file(Path("module.py"))
+        nodes, edges = parser.parse_file(Path("Component.tsx"))
 
-        # Parse raw content
-        nodes, edges = parser.parse_content(source_bytes, "module.py")
+        # Or specify language explicitly
+        parser = CodeParser(language="typescript")
+        nodes, edges = parser.parse_content(source_bytes, "module")
 
         # Add to graph
         db.add_nodes_batch(nodes)
         db.add_edges_batch(edges)
     """
 
+    SUPPORTED_LANGUAGES = {"python", "typescript", "tsx"}
+
     def __init__(self, language: str = "python"):
         """
         Initialize parser for specified language.
 
         Args:
-            language: Programming language ("python" supported, more to come)
+            language: Programming language ("python", "typescript", or "tsx")
         """
-        if language != "python":
-            raise ValueError(f"Language '{language}' not yet supported. Use 'python'.")
+        if language not in self.SUPPORTED_LANGUAGES:
+            raise ValueError(
+                f"Language '{language}' not supported. "
+                f"Use one of: {', '.join(sorted(self.SUPPORTED_LANGUAGES))}"
+            )
 
         self.language = language
-        self.parser = Parser(PY_LANGUAGE)
+
+        # Select language and queries based on type
+        if language == "python":
+            self._lang = PY_LANGUAGE
+            self._query_defs = PYTHON_QUERIES
+        elif language == "typescript":
+            self._lang = TS_LANGUAGE
+            self._query_defs = TYPESCRIPT_QUERIES
+        elif language == "tsx":
+            self._lang = TSX_LANGUAGE
+            self._query_defs = TYPESCRIPT_QUERIES  # TSX uses same queries
+
+        self.parser = Parser(self._lang)
 
         # Pre-compile queries using new Query constructor (tree-sitter 0.25+)
-        self._queries = {
-            name: Query(PY_LANGUAGE, query)
-            for name, query in PYTHON_QUERIES.items()
-        }
+        self._queries = {}
+        for name, query_str in self._query_defs.items():
+            try:
+                self._queries[name] = Query(self._lang, query_str)
+            except Exception as e:
+                # Some queries may not be valid for all languages
+                pass  # Skip invalid queries silently
 
     def parse_file(self, path: Path) -> Tuple[List[NodeData], List[EdgeData]]:
         """
@@ -223,13 +391,25 @@ class CodeParser:
         entities = []
 
         # Extract classes
-        entities.extend(self._extract_classes(tree, content))
+        if "classes" in self._queries:
+            entities.extend(self._extract_classes(tree, content))
 
         # Extract top-level functions (not methods)
-        entities.extend(self._extract_functions(tree, content))
+        if "functions" in self._queries:
+            entities.extend(self._extract_functions(tree, content))
 
         # Extract imports
-        entities.extend(self._extract_imports(tree, content))
+        if "imports" in self._queries:
+            entities.extend(self._extract_imports(tree, content))
+
+        # TypeScript/TSX specific extractions
+        if self.language in ("typescript", "tsx"):
+            if "interfaces" in self._queries:
+                entities.extend(self._extract_interfaces(tree, content))
+            if "types" in self._queries:
+                entities.extend(self._extract_types(tree, content))
+            if "react_components" in self._queries and self.language == "tsx":
+                entities.extend(self._extract_react_components(tree, content))
 
         return entities
 
@@ -378,7 +558,11 @@ class CodeParser:
         """Check if a function node is a method (inside a class)."""
         parent = func_node.parent
         while parent:
+            # Python class
             if parent.type == "class_definition":
+                return True
+            # TypeScript class
+            if parent.type == "class_declaration":
                 return True
             parent = parent.parent
         return False
@@ -386,6 +570,124 @@ class CodeParser:
     def _node_text(self, node: Node, content: bytes) -> str:
         """Extract text from a node."""
         return content[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+    # =========================================================================
+    # TypeScript/TSX Specific Extraction Methods
+    # =========================================================================
+
+    def _extract_interfaces(self, tree: Tree, content: bytes) -> List[ParsedEntity]:
+        """Extract TypeScript interface declarations."""
+        entities = []
+        query = self._queries.get("interfaces")
+        if not query:
+            return entities
+
+        cursor = QueryCursor(query)
+        captures = cursor.captures(tree.root_node)
+
+        interface_names = captures.get("interface_name", [])
+        interface_defs = captures.get("interface_def", [])
+
+        for interface_def_node in interface_defs:
+            # Find the interface name within this definition
+            interface_name = None
+            for name_node in interface_names:
+                if (name_node.start_byte >= interface_def_node.start_byte and
+                    name_node.end_byte <= interface_def_node.end_byte):
+                    interface_name = self._node_text(name_node, content)
+                    break
+
+            if interface_name:
+                entities.append(ParsedEntity(
+                    name=interface_name,
+                    entity_type="interface",
+                    start_line=interface_def_node.start_point[0] + 1,
+                    end_line=interface_def_node.end_point[0] + 1,
+                    start_col=interface_def_node.start_point[1],
+                    end_col=interface_def_node.end_point[1],
+                    content=self._node_text(interface_def_node, content),
+                ))
+
+        return entities
+
+    def _extract_types(self, tree: Tree, content: bytes) -> List[ParsedEntity]:
+        """Extract TypeScript type alias declarations."""
+        entities = []
+        query = self._queries.get("types")
+        if not query:
+            return entities
+
+        cursor = QueryCursor(query)
+        captures = cursor.captures(tree.root_node)
+
+        type_names = captures.get("type_name", [])
+        type_defs = captures.get("type_def", [])
+
+        for type_def_node in type_defs:
+            # Find the type name within this definition
+            type_name = None
+            for name_node in type_names:
+                if (name_node.start_byte >= type_def_node.start_byte and
+                    name_node.end_byte <= type_def_node.end_byte):
+                    type_name = self._node_text(name_node, content)
+                    break
+
+            if type_name:
+                entities.append(ParsedEntity(
+                    name=type_name,
+                    entity_type="type",
+                    start_line=type_def_node.start_point[0] + 1,
+                    end_line=type_def_node.end_point[0] + 1,
+                    start_col=type_def_node.start_point[1],
+                    end_col=type_def_node.end_point[1],
+                    content=self._node_text(type_def_node, content),
+                ))
+
+        return entities
+
+    def _extract_react_components(self, tree: Tree, content: bytes) -> List[ParsedEntity]:
+        """Extract React component definitions (functions returning JSX)."""
+        entities = []
+        query = self._queries.get("react_components")
+        if not query:
+            return entities
+
+        cursor = QueryCursor(query)
+        captures = cursor.captures(tree.root_node)
+
+        component_names = captures.get("component_name", [])
+        component_defs = captures.get("component_def", [])
+
+        seen_components: Set[str] = set()
+
+        for comp_def_node in component_defs:
+            # Find the component name within this definition
+            comp_name = None
+            for name_node in component_names:
+                if (name_node.start_byte >= comp_def_node.start_byte and
+                    name_node.end_byte <= comp_def_node.end_byte):
+                    comp_name = self._node_text(name_node, content)
+                    break
+
+            # React components are PascalCase by convention
+            if comp_name and comp_name[0].isupper() and comp_name not in seen_components:
+                seen_components.add(comp_name)
+
+                # Check if this contains JSX
+                comp_content = self._node_text(comp_def_node, content)
+                if "<" in comp_content and (">" in comp_content or "/>" in comp_content):
+                    entities.append(ParsedEntity(
+                        name=comp_name,
+                        entity_type="react_component",
+                        start_line=comp_def_node.start_point[0] + 1,
+                        end_line=comp_def_node.end_point[0] + 1,
+                        start_col=comp_def_node.start_point[1],
+                        end_col=comp_def_node.end_point[1],
+                        content=comp_content,
+                        metadata={"is_component": True},
+                    ))
+
+        return entities
 
     def _entities_to_graph(
         self,
@@ -477,11 +779,16 @@ class CodeParser:
     def _entity_type_to_node_type(self, entity_type: str) -> str:
         """Map parsed entity type to NodeType enum value."""
         mapping = {
+            # Python types
             "class": NodeType.CLASS.value,
             "function": NodeType.FUNCTION.value,
             "method": NodeType.FUNCTION.value,
             "import": NodeType.CODE.value,  # Imports are code references
             "call": NodeType.CALL.value,
+            # TypeScript types
+            "interface": NodeType.SPEC.value,  # Interfaces are specifications
+            "type": NodeType.SPEC.value,       # Type aliases are specifications
+            "react_component": NodeType.CODE.value,  # Components are code
         }
         return mapping.get(entity_type, NodeType.CODE.value)
 
@@ -543,10 +850,98 @@ def parse_python_directory(
     return all_nodes, all_edges
 
 
+def parse_typescript_file(path: Path) -> Tuple[List[NodeData], List[EdgeData]]:
+    """
+    Parse a TypeScript file and return graph nodes/edges.
+
+    Convenience wrapper around CodeParser.
+    """
+    parser = CodeParser(language="typescript")
+    return parser.parse_file(path)
+
+
+def parse_tsx_file(path: Path) -> Tuple[List[NodeData], List[EdgeData]]:
+    """
+    Parse a TSX (React) file and return graph nodes/edges.
+
+    Convenience wrapper around CodeParser.
+    """
+    parser = CodeParser(language="tsx")
+    return parser.parse_file(path)
+
+
+def parse_typescript_directory(
+    directory: Path,
+    recursive: bool = True,
+    exclude_patterns: Optional[List[str]] = None,
+) -> Tuple[List[NodeData], List[EdgeData]]:
+    """
+    Parse all TypeScript/TSX files in a directory.
+
+    Args:
+        directory: Root directory to scan
+        recursive: Whether to recurse into subdirectories
+        exclude_patterns: Patterns to exclude (e.g., ["node_modules", "dist"])
+
+    Returns:
+        Combined (nodes, edges) from all files
+    """
+    directory = Path(directory)
+    exclude_patterns = exclude_patterns or ["node_modules", "dist", "build", ".git", "coverage"]
+
+    all_nodes = []
+    all_edges = []
+
+    # Parse .ts files
+    ts_parser = CodeParser(language="typescript")
+    tsx_parser = CodeParser(language="tsx")
+
+    pattern_prefix = "**/" if recursive else ""
+
+    # TypeScript files
+    for ts_file in directory.glob(f"{pattern_prefix}*.ts"):
+        if any(excl in str(ts_file) for excl in exclude_patterns):
+            continue
+        # Skip .d.ts declaration files
+        if ts_file.name.endswith(".d.ts"):
+            continue
+        try:
+            nodes, edges = ts_parser.parse_file(ts_file)
+            all_nodes.extend(nodes)
+            all_edges.extend(edges)
+        except Exception as e:
+            print(f"Warning: Failed to parse {ts_file}: {e}")
+
+    # TSX files
+    for tsx_file in directory.glob(f"{pattern_prefix}*.tsx"):
+        if any(excl in str(tsx_file) for excl in exclude_patterns):
+            continue
+        try:
+            nodes, edges = tsx_parser.parse_file(tsx_file)
+            all_nodes.extend(nodes)
+            all_edges.extend(edges)
+        except Exception as e:
+            print(f"Warning: Failed to parse {tsx_file}: {e}")
+
+    # JSX files (use TSX parser)
+    for jsx_file in directory.glob(f"{pattern_prefix}*.jsx"):
+        if any(excl in str(jsx_file) for excl in exclude_patterns):
+            continue
+        try:
+            nodes, edges = tsx_parser.parse_file(jsx_file)
+            all_nodes.extend(nodes)
+            all_edges.extend(edges)
+        except Exception as e:
+            print(f"Warning: Failed to parse {jsx_file}: {e}")
+
+    return all_nodes, all_edges
+
+
 def ingest_codebase(
     directory: Path,
     db,  # ParagonDB - avoid circular import
     recursive: bool = True,
+    languages: Optional[List[str]] = None,
 ) -> Tuple[int, int]:
     """
     Parse and ingest an entire codebase into ParagonDB.
@@ -555,21 +950,36 @@ def ingest_codebase(
         directory: Root directory
         db: ParagonDB instance
         recursive: Whether to recurse
+        languages: List of languages to parse (default: ["python"])
+                   Options: "python", "typescript"
 
     Returns:
         Tuple of (nodes_added, edges_added)
     """
-    nodes, edges = parse_python_directory(directory, recursive=recursive)
+    languages = languages or ["python"]
 
-    db.add_nodes_batch(nodes)
+    all_nodes = []
+    all_edges = []
+
+    if "python" in languages:
+        nodes, edges = parse_python_directory(directory, recursive=recursive)
+        all_nodes.extend(nodes)
+        all_edges.extend(edges)
+
+    if "typescript" in languages:
+        nodes, edges = parse_typescript_directory(directory, recursive=recursive)
+        all_nodes.extend(nodes)
+        all_edges.extend(edges)
+
+    db.add_nodes_batch(all_nodes)
 
     # Only add edges where both nodes exist
-    valid_node_ids = {n.id for n in nodes}
+    valid_node_ids = {n.id for n in all_nodes}
     valid_edges = [
-        e for e in edges
+        e for e in all_edges
         if e.source_id in valid_node_ids and e.target_id in valid_node_ids
     ]
 
     db.add_edges_batch(valid_edges)
 
-    return len(nodes), len(valid_edges)
+    return len(all_nodes), len(valid_edges)

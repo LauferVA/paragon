@@ -465,9 +465,16 @@ class ParagonDB:
 
     def get_all_edges(self) -> List[EdgeData]:
         """Get all edges as a list."""
-        return [self._graph.get_edge_data_by_index(i)
-                for i in range(self._graph.num_edges())
-                if self._graph.has_edge_by_index(i)]
+        edges = []
+        for i in range(self._graph.num_edges()):
+            try:
+                edge_data = self._graph.get_edge_data_by_index(i)
+                if edge_data is not None:
+                    edges.append(edge_data)
+            except (IndexError, ValueError):
+                # Edge index might be invalid if edges were removed
+                continue
+        return edges
 
     def get_incoming_edges(self, node_id: str) -> List[Dict[str, Any]]:
         """

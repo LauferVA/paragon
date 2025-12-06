@@ -7,6 +7,7 @@ Executes golden set tasks against the Paragon system with:
 - Rerun visualization integration
 - Research/Dialectic interaction support
 - Automatic cleanup of artifacts
+- Multi-language test execution (Python pytest, TypeScript Vitest/Jest)
 
 Usage:
     python -m benchmarks.harness --tier smoke
@@ -27,10 +28,12 @@ import time
 import yaml
 import argparse
 import logging
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field, asdict
+from enum import Enum
 
 # Add paragon to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -67,6 +70,316 @@ RUNS_DIR = WORKSPACE_ROOT / "runs"
 METRICS_DIR = WORKSPACE_ROOT / "metrics"
 VIZ_DIR = WORKSPACE_ROOT / "visualizations"
 GOLDEN_SET_PATH = Path(__file__).parent / "golden_set.yaml"
+
+
+# =============================================================================
+# TYPESCRIPT/JAVASCRIPT TEST RUNNER
+# =============================================================================
+
+class TestFramework(Enum):
+    """Supported JavaScript/TypeScript test frameworks."""
+    VITEST = "vitest"
+    JEST = "jest"
+    PYTEST = "pytest"  # For completeness
+
+
+@dataclass
+class TestRunResult:
+    """Result of running a test suite."""
+    success: bool
+    framework: str
+    tests_passed: int = 0
+    tests_failed: int = 0
+    tests_skipped: int = 0
+    duration_ms: float = 0.0
+    output: str = ""
+    error: str = ""
+    coverage_percent: Optional[float] = None
+
+
+class TypeScriptTestRunner:
+    """
+    Runs TypeScript/JavaScript tests using Vitest or Jest.
+
+    Detects the test framework from package.json and runs tests
+    with JSON output for structured result parsing.
+    """
+
+    def __init__(self, project_dir: Path):
+        self.project_dir = Path(project_dir)
+        self.framework = self._detect_framework()
+        self.npm_available = self._check_npm()
+
+    def _check_npm(self) -> bool:
+        """Check if npm is available."""
+        try:
+            result = subprocess.run(
+                ["npm", "--version"],
+                capture_output=True,
+                timeout=10
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return False
+
+    def _detect_framework(self) -> Optional[TestFramework]:
+        """Detect which test framework is configured in package.json."""
+        package_json = self.project_dir / "package.json"
+
+        if not package_json.exists():
+            return None
+
+        try:
+            with open(package_json) as f:
+                pkg = json.load(f)
+
+            dev_deps = pkg.get("devDependencies", {})
+            deps = pkg.get("dependencies", {})
+            all_deps = {**deps, **dev_deps}
+
+            # Check for Vitest first (preferred)
+            if "vitest" in all_deps:
+                return TestFramework.VITEST
+
+            # Check for Jest
+            if "jest" in all_deps or "@jest/core" in all_deps:
+                return TestFramework.JEST
+
+            return None
+        except (json.JSONDecodeError, IOError):
+            return None
+
+    def install_dependencies(self) -> bool:
+        """Run npm install if node_modules doesn't exist."""
+        node_modules = self.project_dir / "node_modules"
+
+        if node_modules.exists():
+            return True
+
+        if not self.npm_available:
+            logger.warning("npm not available, cannot install dependencies")
+            return False
+
+        try:
+            result = subprocess.run(
+                ["npm", "install"],
+                cwd=self.project_dir,
+                capture_output=True,
+                timeout=300,  # 5 minute timeout for install
+                text=True,
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.error(f"Failed to install dependencies: {e}")
+            return False
+
+    def run_tests(
+        self,
+        test_pattern: Optional[str] = None,
+        coverage: bool = False,
+        timeout: int = 120,
+    ) -> TestRunResult:
+        """
+        Run tests and return structured results.
+
+        Args:
+            test_pattern: Optional glob pattern to filter tests
+            coverage: Whether to collect coverage information
+            timeout: Maximum time in seconds for test run
+
+        Returns:
+            TestRunResult with parsed test outcomes
+        """
+        if not self.framework:
+            return TestRunResult(
+                success=False,
+                framework="none",
+                error="No test framework detected in package.json"
+            )
+
+        if not self.npm_available:
+            return TestRunResult(
+                success=False,
+                framework=self.framework.value,
+                error="npm is not available"
+            )
+
+        # Ensure dependencies are installed
+        if not self.install_dependencies():
+            return TestRunResult(
+                success=False,
+                framework=self.framework.value,
+                error="Failed to install dependencies"
+            )
+
+        # Build command based on framework
+        if self.framework == TestFramework.VITEST:
+            cmd = self._build_vitest_command(test_pattern, coverage)
+        elif self.framework == TestFramework.JEST:
+            cmd = self._build_jest_command(test_pattern, coverage)
+        else:
+            return TestRunResult(
+                success=False,
+                framework=self.framework.value,
+                error=f"Unsupported framework: {self.framework}"
+            )
+
+        # Run tests
+        start_time = time.time()
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.project_dir,
+                capture_output=True,
+                timeout=timeout,
+                text=True,
+            )
+            duration_ms = (time.time() - start_time) * 1000
+
+            return self._parse_results(
+                result.returncode,
+                result.stdout,
+                result.stderr,
+                duration_ms,
+            )
+        except subprocess.TimeoutExpired:
+            return TestRunResult(
+                success=False,
+                framework=self.framework.value,
+                error=f"Test run timed out after {timeout}s"
+            )
+        except Exception as e:
+            return TestRunResult(
+                success=False,
+                framework=self.framework.value,
+                error=str(e)
+            )
+
+    def _build_vitest_command(
+        self,
+        test_pattern: Optional[str],
+        coverage: bool,
+    ) -> List[str]:
+        """Build Vitest command."""
+        cmd = ["npx", "vitest", "run", "--reporter=json"]
+
+        if coverage:
+            cmd.append("--coverage")
+
+        if test_pattern:
+            cmd.append(test_pattern)
+
+        return cmd
+
+    def _build_jest_command(
+        self,
+        test_pattern: Optional[str],
+        coverage: bool,
+    ) -> List[str]:
+        """Build Jest command."""
+        cmd = ["npx", "jest", "--json", "--outputFile=/dev/stdout"]
+
+        if coverage:
+            cmd.append("--coverage")
+
+        if test_pattern:
+            cmd.append(test_pattern)
+
+        return cmd
+
+    def _parse_results(
+        self,
+        return_code: int,
+        stdout: str,
+        stderr: str,
+        duration_ms: float,
+    ) -> TestRunResult:
+        """Parse test output into structured result."""
+        # Try to parse JSON output
+        try:
+            # Find JSON in output (may have other text around it)
+            json_start = stdout.find('{')
+            json_end = stdout.rfind('}') + 1
+
+            if json_start >= 0 and json_end > json_start:
+                json_str = stdout[json_start:json_end]
+                data = json.loads(json_str)
+
+                if self.framework == TestFramework.VITEST:
+                    return self._parse_vitest_json(data, duration_ms)
+                elif self.framework == TestFramework.JEST:
+                    return self._parse_jest_json(data, duration_ms)
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            logger.debug(f"Failed to parse test JSON: {e}")
+
+        # Fallback: determine success from return code
+        return TestRunResult(
+            success=return_code == 0,
+            framework=self.framework.value if self.framework else "unknown",
+            duration_ms=duration_ms,
+            output=stdout,
+            error=stderr if return_code != 0 else "",
+        )
+
+    def _parse_vitest_json(self, data: dict, duration_ms: float) -> TestRunResult:
+        """Parse Vitest JSON output."""
+        test_results = data.get("testResults", [])
+
+        passed = 0
+        failed = 0
+        skipped = 0
+
+        for file_result in test_results:
+            for test in file_result.get("assertionResults", []):
+                status = test.get("status", "")
+                if status == "passed":
+                    passed += 1
+                elif status == "failed":
+                    failed += 1
+                elif status in ("skipped", "pending", "todo"):
+                    skipped += 1
+
+        return TestRunResult(
+            success=data.get("success", failed == 0),
+            framework="vitest",
+            tests_passed=passed,
+            tests_failed=failed,
+            tests_skipped=skipped,
+            duration_ms=duration_ms,
+        )
+
+    def _parse_jest_json(self, data: dict, duration_ms: float) -> TestRunResult:
+        """Parse Jest JSON output."""
+        return TestRunResult(
+            success=data.get("success", False),
+            framework="jest",
+            tests_passed=data.get("numPassedTests", 0),
+            tests_failed=data.get("numFailedTests", 0),
+            tests_skipped=data.get("numPendingTests", 0),
+            duration_ms=duration_ms,
+        )
+
+
+def run_typescript_tests(
+    project_dir: Path,
+    test_pattern: Optional[str] = None,
+    coverage: bool = False,
+    timeout: int = 120,
+) -> TestRunResult:
+    """
+    Convenience function to run TypeScript tests.
+
+    Args:
+        project_dir: Directory containing package.json
+        test_pattern: Optional pattern to filter tests
+        coverage: Whether to collect coverage
+        timeout: Maximum test duration in seconds
+
+    Returns:
+        TestRunResult with test outcomes
+    """
+    runner = TypeScriptTestRunner(project_dir)
+    return runner.run_tests(test_pattern, coverage, timeout)
 
 
 # =============================================================================
@@ -118,6 +431,14 @@ class TaskMetrics:
     research_conducted: bool = False
     user_questions_asked: int = 0
     ambiguities_found: int = 0
+
+    # TypeScript/JavaScript test metrics (for frontend tasks)
+    ts_tests_run: bool = False
+    ts_test_framework: str = ""
+    ts_tests_passed: int = 0
+    ts_tests_failed: int = 0
+    ts_tests_skipped: int = 0
+    ts_test_duration_ms: float = 0.0
 
 
 @dataclass

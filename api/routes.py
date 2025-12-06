@@ -37,6 +37,7 @@ from typing import Optional, Dict, Any, List, Set
 import msgspec
 import asyncio
 from pathlib import Path
+from datetime import datetime, timezone
 
 from core.graph_db import ParagonDB
 from core.schemas import NodeData, EdgeData, serialize_node, serialize_nodes, serialize_edges
@@ -67,6 +68,20 @@ _ws_connections: Set[WebSocket] = set()
 # Snapshot cache for comparison view
 _snapshot_cache: Dict[str, GraphSnapshot] = {}
 
+# Sequence counter for delta messages
+_sequence_counter: int = 0
+
+# Orchestrator instance for dialectic interactions
+_orchestrator_instance: Optional[Any] = None
+_orchestrator_state: Dict[str, Any] = {}
+
+
+def _next_sequence() -> int:
+    """Get next sequence number for delta messages."""
+    global _sequence_counter
+    _sequence_counter += 1
+    return _sequence_counter
+
 
 def get_db() -> ParagonDB:
     """Get the global database instance."""
@@ -82,6 +97,19 @@ def get_parser() -> CodeParser:
     if _parser is None:
         _parser = CodeParser()
     return _parser
+
+
+def get_orchestrator():
+    """Get the global orchestrator instance (lazy loaded)."""
+    global _orchestrator_instance
+    if _orchestrator_instance is None:
+        try:
+            from agents.orchestrator import TDDOrchestrator
+            _orchestrator_instance = TDDOrchestrator(enable_checkpointing=True)
+        except ImportError:
+            # Graceful degradation if orchestrator not available
+            _orchestrator_instance = None
+    return _orchestrator_instance
 
 
 # =============================================================================
@@ -179,6 +207,17 @@ async def create_node(request: Request) -> Response:
             )
             nodes.append(node)
         db.add_nodes_batch(nodes)
+
+        # Broadcast delta to WebSocket clients
+        if _ws_connections:
+            viz_nodes = [VizNode.from_node_data(n) for n in nodes]
+            delta = GraphDelta(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                sequence=_next_sequence(),
+                nodes_added=viz_nodes,
+            )
+            await broadcast_delta(delta)
+
         return json_response({"created": len(nodes), "ids": [n.id for n in nodes]}, status_code=201)
     else:
         node = NodeData.create(
@@ -188,6 +227,17 @@ async def create_node(request: Request) -> Response:
             created_by=body.get("created_by", "api"),
         )
         db.add_node(node)
+
+        # Broadcast delta to WebSocket clients
+        if _ws_connections:
+            viz_node = VizNode.from_node_data(node)
+            delta = GraphDelta(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                sequence=_next_sequence(),
+                nodes_added=[viz_node],
+            )
+            await broadcast_delta(delta)
+
         return json_response({"id": node.id}, status_code=201)
 
 
@@ -266,6 +316,17 @@ async def create_edge(request: Request) -> Response:
             )
             edges.append(edge)
         db.add_edges_batch(edges)
+
+        # Broadcast delta to WebSocket clients
+        if _ws_connections:
+            viz_edges = [VizEdge.from_edge_data(e) for e in edges]
+            delta = GraphDelta(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                sequence=_next_sequence(),
+                edges_added=viz_edges,
+            )
+            await broadcast_delta(delta)
+
         return json_response({"created": len(edges)}, status_code=201)
     else:
         edge = EdgeData.create(
@@ -276,6 +337,17 @@ async def create_edge(request: Request) -> Response:
             metadata=body.get("metadata", {}),
         )
         db.add_edge(edge)
+
+        # Broadcast delta to WebSocket clients
+        if _ws_connections:
+            viz_edge = VizEdge.from_edge_data(edge)
+            delta = GraphDelta(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                sequence=_next_sequence(),
+                edges_added=[viz_edge],
+            )
+            await broadcast_delta(delta)
+
         return json_response({"created": 1}, status_code=201)
 
 
@@ -697,6 +769,168 @@ async def broadcast_delta(delta: GraphDelta) -> None:
 
 
 # =============================================================================
+# DIALECTIC ENDPOINTS (Phase 3 - Human-in-the-Loop)
+# =============================================================================
+
+async def get_dialector_questions(request: Request) -> JSONResponse:
+    """
+    Get current ambiguity questions from the orchestrator.
+
+    Returns pending clarification questions from the dialectic phase.
+
+    Response:
+        {
+            "questions": [
+                {
+                    "id": "question_id",
+                    "text": "What specific criteria define 'fast'?",
+                    "category": "SUBJECTIVE_TERMS",
+                    "suggested_answer": "< 100ms latency"
+                }
+            ],
+            "phase": "clarification",
+            "session_id": "session_id"
+        }
+    """
+    global _orchestrator_state
+
+    # Check if we have an active orchestrator state with pending questions
+    questions = _orchestrator_state.get("clarification_questions", [])
+    phase = _orchestrator_state.get("phase", "init")
+    session_id = _orchestrator_state.get("session_id", "")
+
+    # Format questions for frontend
+    formatted_questions = []
+    for i, q in enumerate(questions):
+        formatted_questions.append({
+            "id": f"q_{i}",
+            "text": q.get("question", ""),
+            "category": q.get("category", ""),
+            "suggested_answer": q.get("suggested_answer", ""),
+            "ambiguity_text": q.get("text", ""),
+        })
+
+    return JSONResponse({
+        "questions": formatted_questions,
+        "phase": phase,
+        "session_id": session_id,
+        "has_questions": len(formatted_questions) > 0,
+    })
+
+
+async def submit_dialector_answer(request: Request) -> JSONResponse:
+    """
+    Submit user answers to ambiguity questions.
+
+    Body:
+        {
+            "session_id": "session_id",
+            "answers": [
+                {"question_id": "q_0", "answer": "Response latency < 100ms"},
+                {"question_id": "q_1", "answer": "REST API"}
+            ]
+        }
+
+    Response:
+        {
+            "success": true,
+            "message": "Answers submitted, orchestrator resumed",
+            "new_phase": "research"
+        }
+    """
+    try:
+        body = await request.json()
+    except Exception as e:
+        return error_response(f"Invalid JSON: {e}")
+
+    session_id = body.get("session_id")
+    answers = body.get("answers", [])
+
+    if not session_id:
+        return error_response("session_id is required", status_code=400)
+
+    if not answers:
+        return error_response("answers array is required", status_code=400)
+
+    # Format answers as a human response
+    answer_text = "\n".join([
+        f"{i+1}. {ans.get('answer', '')}"
+        for i, ans in enumerate(answers)
+    ])
+
+    global _orchestrator_state
+    _orchestrator_state["human_response"] = answer_text
+    _orchestrator_state["pending_human_input"] = None
+
+    # Try to resume orchestrator if available
+    orchestrator = get_orchestrator()
+    new_phase = "research"  # Default next phase after clarification
+
+    if orchestrator and session_id:
+        try:
+            # Resume the orchestrator with the human response
+            result = orchestrator.resume(session_id, human_response=answer_text)
+            new_phase = result.get("phase", "research")
+            _orchestrator_state.update(result)
+        except Exception as e:
+            # If resume fails, just update state manually
+            _orchestrator_state["phase"] = "research"
+            new_phase = "research"
+
+    return JSONResponse({
+        "success": True,
+        "message": "Answers submitted successfully",
+        "new_phase": new_phase,
+        "session_id": session_id,
+    })
+
+
+async def get_orchestrator_state(request: Request) -> JSONResponse:
+    """
+    Get current orchestrator state.
+
+    Query params:
+        session_id: Optional session filter
+
+    Response:
+        {
+            "phase": "clarification",
+            "session_id": "...",
+            "has_pending_input": true,
+            "iteration": 0
+        }
+    """
+    session_id = request.query_params.get("session_id")
+
+    orchestrator = get_orchestrator()
+    if orchestrator and session_id:
+        try:
+            state = orchestrator.get_state(session_id)
+            if state:
+                return JSONResponse({
+                    "phase": state.get("phase", "init"),
+                    "session_id": session_id,
+                    "has_pending_input": state.get("pending_human_input") is not None,
+                    "iteration": state.get("iteration", 0),
+                    "dialectic_passed": state.get("dialectic_passed", False),
+                    "research_complete": state.get("research_complete", False),
+                })
+        except Exception:
+            pass
+
+    # Fallback to global state
+    global _orchestrator_state
+    return JSONResponse({
+        "phase": _orchestrator_state.get("phase", "init"),
+        "session_id": _orchestrator_state.get("session_id", ""),
+        "has_pending_input": _orchestrator_state.get("pending_human_input") is not None,
+        "iteration": _orchestrator_state.get("iteration", 0),
+        "dialectic_passed": _orchestrator_state.get("dialectic_passed", False),
+        "research_complete": _orchestrator_state.get("research_complete", False),
+    })
+
+
+# =============================================================================
 # APP FACTORY
 # =============================================================================
 
@@ -733,6 +967,11 @@ def create_routes() -> List[Route]:
         Route("/api/viz/compare", viz_compare, methods=["GET"]),
         Route("/api/viz/snapshots", viz_list_snapshots, methods=["GET"]),
         Route("/api/viz/snapshots", viz_save_snapshot, methods=["POST"]),
+
+        # Dialectic endpoints (Phase 3)
+        Route("/api/dialector/questions", get_dialector_questions, methods=["GET"]),
+        Route("/api/dialector/answer", submit_dialector_answer, methods=["POST"]),
+        Route("/api/orchestrator/state", get_orchestrator_state, methods=["GET"]),
     ]
 
 

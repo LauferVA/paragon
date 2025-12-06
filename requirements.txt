@@ -22,6 +22,7 @@ pandera>=0.18.0            # DataFrame schema validation (works with Polars)
 # -----------------------------------------------------------------------------
 tree-sitter>=0.20.0        # Incremental parsing library
 tree-sitter-python         # Python grammar for tree-sitter
+tree-sitter-typescript     # TypeScript/TSX grammar for tree-sitter
 
 # -----------------------------------------------------------------------------
 # GRAPH ALIGNMENT
