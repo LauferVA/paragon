@@ -165,6 +165,7 @@ class AmbiguityMarker(msgspec.Struct, kw_only=True, frozen=True):
     text: str  # The ambiguous text
     impact: str  # "BLOCKING", "CLARIFYING"
     suggested_question: Optional[str] = None
+    suggested_answer: Optional[str] = None  # LLM's best-guess answer for automated/assisted mode
 
 
 class DialectorOutput(msgspec.Struct, kw_only=True, frozen=True):

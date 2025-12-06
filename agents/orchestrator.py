@@ -244,14 +244,20 @@ def dialectic_node(state: GraphState) -> Dict[str, Any]:
             system_prompt = """You are the DIALECTOR agent. Analyze the requirement for ambiguity that would prevent autonomous code generation.
 
 Scan for:
-1. SUBJECTIVE TERMS: "fast", "efficient", "user-friendly"
-2. COMPARATIVE STATEMENTS: "faster than", "better than" (compared to what?)
-3. UNDEFINED PRONOUNS: "it", "this" without clear referent
-4. UNDEFINED TERMS: Domain-specific terms needing definition
-5. MISSING CONTEXT: Input/output format not specified
+1. SUBJECTIVE_TERMS: "fast", "efficient", "user-friendly"
+2. COMPARATIVE_STATEMENTS: "faster than", "better than" (compared to what?)
+3. UNDEFINED_PRONOUN: "it", "this" without clear referent
+4. UNDEFINED_TERM: Domain-specific terms needing definition
+5. MISSING_CONTEXT: Input/output format not specified
 
-For technical, well-defined requirements like "implement fibonacci" or "create a stack class", return verdict: CLEAR.
-Only flag as NEEDS_CLARIFICATION if there's genuine blocking ambiguity."""
+For each ambiguity you find:
+- Provide a suggested_question to ask the user
+- Provide a suggested_answer with your best-guess reasonable default (e.g., for "fast" suggest "< 100ms latency")
+
+The suggested_answer helps users accept a reasonable default if they don't have a strong preference.
+
+For technical, well-defined requirements like "implement fibonacci" or "create a stack class", return is_clear: true.
+Only set is_clear: false if there's genuine blocking ambiguity."""
 
             user_prompt = f"""# Requirement to Analyze
 
@@ -280,13 +286,14 @@ Analyze for ambiguity. Return structured output with verdict (CLEAR or NEEDS_CLA
 
             if not actually_clear and result.ambiguities:
                 # Found ambiguities - generate clarification questions for each
-                # AmbiguityMarker has: category, text, impact, suggested_question
+                # AmbiguityMarker has: category, text, impact, suggested_question, suggested_answer
                 for amb in result.ambiguities:
                     ambiguities.append({
                         "text": amb.text,
                         "category": amb.category,
                         "impact": amb.impact,
                         "question": amb.suggested_question,
+                        "suggested_answer": getattr(amb, 'suggested_answer', None),
                     })
 
                     # Treat ALL ambiguities as needing clarification
@@ -310,6 +317,7 @@ Analyze for ambiguity. Return structured output with verdict (CLEAR or NEEDS_CLA
                         "question": question_text,
                         "category": amb.category,
                         "text": amb.text,
+                        "suggested_answer": getattr(amb, 'suggested_answer', None),
                     })
 
                 if clarification_questions:

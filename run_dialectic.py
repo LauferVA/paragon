@@ -49,17 +49,49 @@ def print_finding(title: str, content: str):
     else:
         print(f"\n--- {title} ---\n{content}\n")
 
-def print_question(question: str, context: str = ""):
+def print_question(question: str, context: str = "", suggested_answer: str = None):
     if RICH_AVAILABLE:
-        console.print(Panel(f"[bold]{question}[/bold]\n\n{context}", title="❓ Clarification Needed", border_style="yellow"))
+        content = f"[bold]{question}[/bold]\n\n{context}"
+        if suggested_answer:
+            content += f"\n\n[dim]Suggested answer:[/dim] [italic green]{suggested_answer}[/italic green]"
+        console.print(Panel(content, title="❓ Clarification Needed", border_style="yellow"))
     else:
-        print(f"\n❓ CLARIFICATION NEEDED:\n{question}\n{context}\n")
+        print(f"\n❓ CLARIFICATION NEEDED:\n{question}\n{context}")
+        if suggested_answer:
+            print(f"\nSuggested answer: {suggested_answer}\n")
 
 def get_user_input(prompt: str) -> str:
     if RICH_AVAILABLE:
         return Prompt.ask(f"[bold cyan]{prompt}[/bold cyan]")
     else:
         return input(f"{prompt}: ")
+
+def get_answer_with_suggestion(question_num: int, total: int, suggested_answer: str = None) -> str:
+    """
+    Get user's answer, offering them the choice to accept the suggested answer or provide their own.
+    """
+    if suggested_answer:
+        if RICH_AVAILABLE:
+            console.print(f"\n[bold cyan]Options:[/bold cyan]")
+            console.print(f"  [1] Accept suggested answer")
+            console.print(f"  [2] Provide your own answer")
+            choice = Prompt.ask("Your choice", choices=["1", "2"], default="1")
+        else:
+            print(f"\nOptions:")
+            print(f"  [1] Accept suggested answer")
+            print(f"  [2] Provide your own answer")
+            choice = input("Your choice (1/2) [1]: ").strip() or "1"
+
+        if choice == "1":
+            if RICH_AVAILABLE:
+                console.print(f"[green]✓ Using suggested answer[/green]")
+            else:
+                print("✓ Using suggested answer")
+            return suggested_answer
+        else:
+            return get_user_input("Your answer")
+    else:
+        return get_user_input("Your answer")
 
 def run_interactive_dialectic():
     """Run the orchestrator with interactive dialectic."""
@@ -168,13 +200,15 @@ Support multiple channels.""",
             question_text = q.get("question", "Please clarify")
             category = q.get("category", "")
             ambiguous_text = q.get("text", "")
+            suggested_answer = q.get("suggested_answer")
 
             print_question(
                 f"Question {i}/{len(questions)}: {question_text}",
-                f"Category: {category}\nAmbiguous phrase: \"{ambiguous_text}\""
+                f"Category: {category}\nAmbiguous phrase: \"{ambiguous_text}\"",
+                suggested_answer=suggested_answer
             )
 
-            response = get_user_input("Your answer")
+            response = get_answer_with_suggestion(i, len(questions), suggested_answer)
             user_responses.append({
                 "question": question_text,
                 "response": response,
