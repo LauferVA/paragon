@@ -468,7 +468,7 @@ class StructuredLLM:
         self,
         model: str = "claude-sonnet-4-5-20250929",
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
     ):
         """
         Initialize the structured LLM.
@@ -476,7 +476,7 @@ class StructuredLLM:
         Args:
             model: LiteLLM model identifier (e.g., "gpt-4o", "claude-sonnet-4-5-20250929")
             temperature: Sampling temperature (0.0 = deterministic)
-            max_tokens: Maximum tokens in response
+            max_tokens: Maximum tokens in response (Claude 4.5 supports up to 64K)
         """
         self.model = model
         self.temperature = temperature
