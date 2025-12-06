@@ -42,17 +42,17 @@ class ProtocolResult:
     error_message: str = ""
 
 
-def run_protocol_alpha() -> ProtocolResult:
+def run_protocol_alpha_wrapper() -> ProtocolResult:
     """Protocol Alpha: Core Graph Operations (Rustworkx)."""
     start = time.perf_counter()
     try:
-        from benchmarks.protocol_alpha import run_benchmark
-        result = run_benchmark()
+        from benchmarks.protocol_alpha import run_protocol_alpha
+        results = run_protocol_alpha()
         duration = time.perf_counter() - start
 
-        # Extract pass/fail from result
-        passed = result.get("passed", 0)
-        total = result.get("total", 0)
+        # Results is a list of BenchmarkResult objects
+        total = len(results)
+        passed = sum(1 for r in results if r.passed)
         status = ProtocolStatus.PASSED if passed == total else ProtocolStatus.FAILED
 
         return ProtocolResult(
@@ -74,16 +74,17 @@ def run_protocol_alpha() -> ProtocolResult:
         )
 
 
-def run_protocol_beta() -> ProtocolResult:
+def run_protocol_beta_wrapper() -> ProtocolResult:
     """Protocol Beta: Wavefront Traversal (rx.layers)."""
     start = time.perf_counter()
     try:
-        from benchmarks.protocol_beta import run_benchmark
-        result = run_benchmark()
+        from benchmarks.protocol_beta import run_protocol_beta
+        results = run_protocol_beta()
         duration = time.perf_counter() - start
 
-        passed = result.get("passed", 0)
-        total = result.get("total", 0)
+        # Results is a list of IntegrityResult objects
+        total = len(results)
+        passed = sum(1 for r in results if r.passed)
         status = ProtocolStatus.PASSED if passed == total else ProtocolStatus.FAILED
 
         return ProtocolResult(
@@ -105,16 +106,15 @@ def run_protocol_beta() -> ProtocolResult:
         )
 
 
-def run_protocol_gamma() -> ProtocolResult:
+def run_protocol_gamma_wrapper() -> ProtocolResult:
     """Protocol Gamma: Schema Validation (msgspec + Pandera)."""
     start = time.perf_counter()
     try:
-        from benchmarks.protocol_gamma import run_benchmark
-        result = run_benchmark()
+        from benchmarks.protocol_gamma import run_tests
+        # run_tests returns (passed, total, errors)
+        passed, total, errors = run_tests()
         duration = time.perf_counter() - start
 
-        passed = result.get("passed", 0)
-        total = result.get("total", 0)
         status = ProtocolStatus.PASSED if passed == total else ProtocolStatus.FAILED
 
         return ProtocolResult(
@@ -136,16 +136,15 @@ def run_protocol_gamma() -> ProtocolResult:
         )
 
 
-def run_protocol_delta() -> ProtocolResult:
+def run_protocol_delta_wrapper() -> ProtocolResult:
     """Protocol Delta: Graph Alignment (pygmtools)."""
     start = time.perf_counter()
     try:
-        from benchmarks.protocol_delta import run_benchmark
-        result = run_benchmark()
+        from benchmarks.protocol_delta import run_tests
+        # run_tests returns (passed, total, errors)
+        passed, total, errors = run_tests()
         duration = time.perf_counter() - start
 
-        passed = result.get("passed", 0)
-        total = result.get("total", 0)
         status = ProtocolStatus.PASSED if passed == total else ProtocolStatus.FAILED
 
         return ProtocolResult(
@@ -167,12 +166,13 @@ def run_protocol_delta() -> ProtocolResult:
         )
 
 
-def run_protocol_epsilon() -> ProtocolResult:
+def run_protocol_epsilon_wrapper() -> ProtocolResult:
     """Protocol Epsilon: End-to-End Integration."""
     start = time.perf_counter()
     try:
-        from benchmarks.protocol_epsilon import run_benchmark
-        result = run_benchmark()
+        from benchmarks.protocol_epsilon import run_protocol_epsilon
+        # run_protocol_epsilon returns dict with 'passed', 'total', 'errors'
+        result = run_protocol_epsilon()
         duration = time.perf_counter() - start
 
         passed = result.get("passed", 0)
@@ -199,11 +199,11 @@ def run_protocol_epsilon() -> ProtocolResult:
 
 
 PROTOCOL_MAP = {
-    "alpha": run_protocol_alpha,
-    "beta": run_protocol_beta,
-    "gamma": run_protocol_gamma,
-    "delta": run_protocol_delta,
-    "epsilon": run_protocol_epsilon,
+    "alpha": run_protocol_alpha_wrapper,
+    "beta": run_protocol_beta_wrapper,
+    "gamma": run_protocol_gamma_wrapper,
+    "delta": run_protocol_delta_wrapper,
+    "epsilon": run_protocol_epsilon_wrapper,
 }
 
 
