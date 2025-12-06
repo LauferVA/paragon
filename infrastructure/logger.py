@@ -621,3 +621,233 @@ def log_edge_created(
 ) -> MutationEvent:
     """Convenience function to log edge creation."""
     return get_logger().log_edge_created(source_id, target_id, edge_type)
+
+
+# =============================================================================
+# AUDIT LOGGER (Forensic Traceability)
+# =============================================================================
+
+class AuditEntry(msgspec.Struct, kw_only=True, frozen=True):
+    """
+    Audit log entry for forensic traceability.
+
+    Every entry includes: {timestamp, agent_id, node_id, merkle_hash, action}
+    """
+    timestamp: str                      # ISO8601 UTC timestamp
+    agent_id: Optional[str] = None      # Agent that performed action
+    agent_role: Optional[str] = None    # Agent role (BUILDER, TESTER, etc.)
+    node_id: Optional[str] = None       # Affected node ID
+    merkle_hash: Optional[str] = None   # Merkle hash of node/graph at time of action
+    action: str = ""                    # Action performed (e.g., "node_created", "status_changed")
+    details: Dict[str, Any] = msgspec.field(default_factory=dict)  # Additional context
+
+
+class AuditLogger:
+    """
+    Forensic audit logger for graph mutations.
+
+    Logs every mutation with complete traceability:
+    - Who (agent_id)
+    - What (action, node_id)
+    - When (timestamp)
+    - State (merkle_hash)
+
+    Storage: Structured JSONL in data/audit.log
+    Format: One JSON object per line for easy parsing and streaming
+
+    Thread-safe for concurrent logging.
+    """
+
+    def __init__(self, log_path: Optional[Path] = None):
+        """
+        Initialize audit logger.
+
+        Args:
+            log_path: Path to audit log file. If None, uses data/audit.log
+        """
+        if log_path is None:
+            log_path = Path("data/audit.log")
+
+        self.log_path = log_path
+        self._lock = threading.Lock()
+        self._encoder = msgspec.json.Encoder()
+
+        # Ensure directory exists
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def log(self, entry: AuditEntry) -> None:
+        """
+        Write an audit entry to the log.
+
+        Args:
+            entry: AuditEntry to log
+        """
+        with self._lock:
+            try:
+                # Serialize to JSON
+                data = msgspec.to_builtins(entry)
+                line = json.dumps(data, separators=(',', ':')) + "\n"
+
+                # Append to file
+                with open(self.log_path, "a", encoding="utf-8") as f:
+                    f.write(line)
+
+            except Exception as e:
+                print(f"AuditLogger error: {e}")
+
+    def log_action(
+        self,
+        action: str,
+        node_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        merkle_hash: Optional[str] = None,
+        **details
+    ) -> None:
+        """
+        Log an action with automatic timestamp.
+
+        Args:
+            action: Action name (e.g., "node_created", "edge_added")
+            node_id: Affected node ID
+            agent_id: Agent that performed action
+            agent_role: Agent role
+            merkle_hash: Merkle hash of node/graph
+            **details: Additional context as kwargs
+        """
+        entry = AuditEntry(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            agent_id=agent_id,
+            agent_role=agent_role,
+            node_id=node_id,
+            merkle_hash=merkle_hash,
+            action=action,
+            details=details
+        )
+        self.log(entry)
+
+    def read_entries(
+        self,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        node_id: Optional[str] = None,
+        action: Optional[str] = None,
+    ) -> List[AuditEntry]:
+        """
+        Read audit entries with optional filtering.
+
+        Args:
+            since: ISO8601 timestamp - only entries after this
+            until: ISO8601 timestamp - only entries before this
+            agent_id: Filter by agent ID
+            node_id: Filter by node ID
+            action: Filter by action type
+
+        Returns:
+            List of matching AuditEntry objects
+        """
+        if not self.log_path.exists():
+            return []
+
+        entries = []
+        decoder = msgspec.json.Decoder(type=AuditEntry)
+
+        with open(self.log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    entry = decoder.decode(line.encode())
+
+                    # Apply filters
+                    if since and entry.timestamp < since:
+                        continue
+                    if until and entry.timestamp > until:
+                        continue
+                    if agent_id and entry.agent_id != agent_id:
+                        continue
+                    if node_id and entry.node_id != node_id:
+                        continue
+                    if action and entry.action != action:
+                        continue
+
+                    entries.append(entry)
+
+                except Exception as e:
+                    print(f"Failed to parse audit entry: {e}")
+                    continue
+
+        return entries
+
+    def get_node_history(self, node_id: str) -> List[AuditEntry]:
+        """Get complete audit history for a node."""
+        return self.read_entries(node_id=node_id)
+
+    def get_agent_activity(self, agent_id: str) -> List[AuditEntry]:
+        """Get all activity by a specific agent."""
+        return self.read_entries(agent_id=agent_id)
+
+    def get_recent(self, n: int = 100) -> List[AuditEntry]:
+        """Get the n most recent audit entries."""
+        if not self.log_path.exists():
+            return []
+
+        entries = []
+        decoder = msgspec.json.Decoder(type=AuditEntry)
+
+        # Read file in reverse to get most recent first
+        with open(self.log_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+        for line in reversed(lines[-n:]):
+            line = line.strip()
+            if not line:
+                continue
+
+            try:
+                entry = decoder.decode(line.encode())
+                entries.append(entry)
+            except Exception:
+                continue
+
+        return entries
+
+    def clear(self) -> None:
+        """Clear the audit log (use with caution!)."""
+        with self._lock:
+            if self.log_path.exists():
+                self.log_path.unlink()
+
+
+# Global audit logger instance
+_global_audit_logger: Optional[AuditLogger] = None
+
+
+def get_audit_logger(log_path: Optional[Path] = None) -> AuditLogger:
+    """Get or create the global audit logger instance."""
+    global _global_audit_logger
+    if _global_audit_logger is None:
+        _global_audit_logger = AuditLogger(log_path=log_path)
+    return _global_audit_logger
+
+
+def log_audit(
+    action: str,
+    node_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    agent_role: Optional[str] = None,
+    merkle_hash: Optional[str] = None,
+    **details
+) -> None:
+    """Convenience function for audit logging."""
+    get_audit_logger().log_action(
+        action=action,
+        node_id=node_id,
+        agent_id=agent_id,
+        agent_role=agent_role,
+        merkle_hash=merkle_hash,
+        **details
+    )

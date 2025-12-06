@@ -123,3 +123,112 @@ backend = "console"
 
 # Metrics collection interval (seconds)
 metrics_interval = 10
+
+# =============================================================================
+# OBSERVABILITY CONFIGURATION (Time Machine)
+# =============================================================================
+
+[observability]
+# Rerun session recording directory
+log_dir = "./data/sessions"
+
+# Session file naming pattern (supports: {timestamp}, {session_id})
+session_pattern = "{timestamp}_{session_id}.rrd"
+
+# Enable/disable Rerun logging
+rerun_enabled = true
+
+# =============================================================================
+# RESOURCE GUARD CONFIGURATION (Optimizer)
+# =============================================================================
+
+[system.resources]
+# RAM threshold (percentage) - pause orchestrator if exceeded
+ram_threshold_percent = 90
+
+# CPU threshold (percentage) - pause if sustained for duration_seconds
+cpu_threshold_percent = 95
+
+# Duration (seconds) before triggering pause
+sustained_duration_seconds = 60
+
+# Poll interval for resource monitoring
+poll_interval_seconds = 5
+
+# =============================================================================
+# LLM ROUTING CONFIGURATION (Cost Arbitrage)
+# =============================================================================
+
+[llm.routing]
+# High-reasoning tasks (Architect, Builder, Coder)
+high_reasoning_provider = "anthropic"
+high_reasoning_model = "claude-sonnet-4-20250514"
+
+# Mundane tasks (Documenter, LogScrubber, Formatter)
+mundane_provider = "ollama"
+mundane_model = "llama3"
+
+# Fallback if local model unavailable
+mundane_fallback_provider = "anthropic"
+mundane_fallback_model = "claude-3-5-haiku-20241022"
+
+# =============================================================================
+# RESEARCH CONFIGURATION (Web Search)
+# =============================================================================
+
+[research]
+# Search provider (tavily recommended for production)
+provider = "tavily"
+
+# API key read from environment variable TAVILY_API_KEY
+# (do not put actual key here - use env var)
+
+# Maximum results per search
+max_results = 5
+
+# Search depth (basic or advanced)
+search_depth = "advanced"
+
+# =============================================================================
+# GIT SYNC CONFIGURATION (Historian)
+# =============================================================================
+
+[git]
+# Enable/disable automatic git commits
+enabled = true
+
+# Repository path (default: current directory)
+repo_path = "."
+
+# Auto-commit on transaction boundaries
+auto_commit = true
+
+# Auto-push after commit (DANGEROUS - use with caution!)
+auto_push = false
+
+# Commit message prefix (optional)
+commit_prefix = ""
+
+# Git author configuration
+author_name = "Paragon"
+author_email = "paragon@localhost"
+
+# =============================================================================
+# DOCUMENTER CONFIGURATION (Historian)
+# =============================================================================
+
+[documenter]
+# README path
+readme_path = "README.md"
+
+# Changelog path
+changelog_path = "CHANGELOG.md"
+
+# Wiki directory
+wiki_path = "docs/wiki"
+
+# Auto-generate documentation
+auto_generate = true
+
+# Include pending nodes in documentation
+include_pending_nodes = false

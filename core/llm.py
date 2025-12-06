@@ -26,11 +26,17 @@ Architecture:
         |
         v
     Return T (or retry on ValidationError)
+
+Model Routing (Cost Arbitrage):
+    ModelRouter routes tasks to appropriate models based on task complexity:
+    - HIGH_REASONING tasks (Architect, Builder, Coder) -> Claude Sonnet
+    - MUNDANE tasks (Documenter, LogScrubber, Formatter) -> Ollama/Llama3
 """
 import os
 import json
 import msgspec
-from typing import Type, TypeVar, Optional, Any, Dict, List
+from typing import Type, TypeVar, Optional, Any, Dict, List, Tuple
+from enum import Enum
 import litellm
 from tenacity import (
     retry,
@@ -42,6 +48,143 @@ from tenacity import (
 
 # Generic type for return values
 T = TypeVar("T", bound=msgspec.Struct)
+
+
+# =============================================================================
+# TASK TYPES (for Model Routing)
+# =============================================================================
+
+class TaskType(Enum):
+    """
+    Task complexity classification for model routing.
+
+    HIGH_REASONING: Complex tasks requiring deep reasoning
+        - Examples: Architect (design decisions), Builder (code generation),
+                   Coder (complex refactoring)
+
+    MUNDANE: Simple tasks with deterministic outputs
+        - Examples: Documenter (formatting), LogScrubber (cleanup),
+                   Formatter (style enforcement)
+    """
+    HIGH_REASONING = "high_reasoning"
+    MUNDANE = "mundane"
+
+
+# =============================================================================
+# MODEL ROUTER (Cost Arbitrage)
+# =============================================================================
+
+class ModelRouter:
+    """
+    Deterministic router for cost-optimized model selection.
+
+    Routes tasks to appropriate models based on complexity:
+    - HIGH_REASONING -> Expensive models (Claude Sonnet)
+    - MUNDANE -> Cheap/local models (Ollama/Llama3)
+
+    Usage:
+        config = load_config()
+        router = ModelRouter(config["llm"]["routing"])
+
+        provider, model = router.route(TaskType.HIGH_REASONING)
+        # Returns: ("anthropic", "claude-sonnet-4-20250514")
+
+        provider, model = router.route(TaskType.MUNDANE)
+        # Returns: ("ollama", "llama3")
+
+    Configuration (from paragon.toml):
+        [llm.routing]
+        high_reasoning_provider = "anthropic"
+        high_reasoning_model = "claude-sonnet-4-20250514"
+        mundane_provider = "ollama"
+        mundane_model = "llama3"
+        mundane_fallback_provider = "anthropic"
+        mundane_fallback_model = "claude-3-5-haiku-20241022"
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        """
+        Initialize the model router.
+
+        Args:
+            config: Configuration dict from [llm.routing] section
+        """
+        # High reasoning configuration
+        self.high_reasoning_provider = config.get(
+            "high_reasoning_provider", "anthropic"
+        )
+        self.high_reasoning_model = config.get(
+            "high_reasoning_model", "claude-sonnet-4-20250514"
+        )
+
+        # Mundane task configuration
+        self.mundane_provider = config.get("mundane_provider", "ollama")
+        self.mundane_model = config.get("mundane_model", "llama3")
+
+        # Fallback for when local models unavailable
+        self.mundane_fallback_provider = config.get(
+            "mundane_fallback_provider", "anthropic"
+        )
+        self.mundane_fallback_model = config.get(
+            "mundane_fallback_model", "claude-3-5-haiku-20241022"
+        )
+
+    def route(self, task_type: TaskType, use_fallback: bool = False) -> Tuple[str, str]:
+        """
+        Route a task to the appropriate model.
+
+        Args:
+            task_type: The type of task (HIGH_REASONING or MUNDANE)
+            use_fallback: If True, use fallback for MUNDANE tasks (for local model failures)
+
+        Returns:
+            Tuple of (provider, model) strings
+                - provider: LiteLLM provider identifier (e.g., "anthropic", "ollama")
+                - model: Model identifier (e.g., "claude-sonnet-4-20250514", "llama3")
+
+        Examples:
+            >>> router.route(TaskType.HIGH_REASONING)
+            ('anthropic', 'claude-sonnet-4-20250514')
+
+            >>> router.route(TaskType.MUNDANE)
+            ('ollama', 'llama3')
+
+            >>> router.route(TaskType.MUNDANE, use_fallback=True)
+            ('anthropic', 'claude-3-5-haiku-20241022')
+        """
+        if task_type == TaskType.HIGH_REASONING:
+            return (self.high_reasoning_provider, self.high_reasoning_model)
+
+        elif task_type == TaskType.MUNDANE:
+            if use_fallback:
+                return (self.mundane_fallback_provider, self.mundane_fallback_model)
+            else:
+                return (self.mundane_provider, self.mundane_model)
+
+        else:
+            # Should never happen with Enum type safety
+            raise ValueError(f"Unknown task type: {task_type}")
+
+    def get_model_for_task(self, task_type: TaskType, use_fallback: bool = False) -> str:
+        """
+        Get the full model identifier for LiteLLM.
+
+        Args:
+            task_type: The type of task
+            use_fallback: If True, use fallback for MUNDANE tasks
+
+        Returns:
+            Full model string for LiteLLM (e.g., "anthropic/claude-sonnet-4-20250514")
+        """
+        provider, model = self.route(task_type, use_fallback)
+
+        # LiteLLM format: "provider/model" or just "model" for some providers
+        if provider in ["anthropic", "openai"]:
+            # These providers need explicit prefix
+            return f"{provider}/{model}"
+        else:
+            # Ollama and others can use model name directly
+            return model
 
 
 # =============================================================================
