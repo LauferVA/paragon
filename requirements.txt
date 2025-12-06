@@ -1,0 +1,53 @@
+# =============================================================================
+# PARAGON DEPENDENCIES (v2.1.0)
+# =============================================================================
+# Core runtime dependencies for the Rust-accelerated graph platform.
+# Install with: pip install -r requirements.txt
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CORE: Graph & Data (Rust-backed)
+# -----------------------------------------------------------------------------
+rustworkx>=0.17.0          # Rust graph library (replaces NetworkX)
+polars>=0.20.0             # Rust DataFrame library (replaces Pandas)
+msgspec>=0.18.0            # Fast msgpack/JSON serialization (replaces Pydantic)
+
+# -----------------------------------------------------------------------------
+# SCHEMA VALIDATION
+# -----------------------------------------------------------------------------
+pandera>=0.18.0            # DataFrame schema validation (works with Polars)
+
+# -----------------------------------------------------------------------------
+# CODE ANALYSIS
+# -----------------------------------------------------------------------------
+tree-sitter>=0.20.0        # Incremental parsing library
+tree-sitter-python         # Python grammar for tree-sitter
+
+# -----------------------------------------------------------------------------
+# GRAPH ALIGNMENT
+# -----------------------------------------------------------------------------
+pygmtools>=0.4.0           # Graph matching algorithms (RRWM, etc.)
+
+# -----------------------------------------------------------------------------
+# ORCHESTRATION
+# -----------------------------------------------------------------------------
+langgraph>=0.2.0           # LangChain graph orchestration (stable API)
+langgraph-checkpoint-sqlite>=1.0.0  # Durable SQLite checkpointing for restarts
+
+# -----------------------------------------------------------------------------
+# SERVER
+# -----------------------------------------------------------------------------
+granian>=0.5.0             # Rust-based ASGI server
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: Development & Testing
+# -----------------------------------------------------------------------------
+# pytest>=8.0.0            # Testing framework
+# hypothesis>=6.0.0        # Property-based testing
+# ruff>=0.1.0              # Fast linter
+
+# -----------------------------------------------------------------------------
+# OPTIONAL: LLM Providers (install as needed)
+# -----------------------------------------------------------------------------
+# anthropic>=0.18.0        # Anthropic Claude SDK
+# openai>=1.0.0            # OpenAI SDK
