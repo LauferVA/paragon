@@ -42,14 +42,34 @@ from agents.tools import (
     update_node_status,
 )
 
+# Diagnostic logging for phase timing and state tracking
+try:
+    from infrastructure.diagnostics import get_diagnostics, reset_diagnostics
+    DIAGNOSTICS_AVAILABLE = True
+except ImportError:
+    DIAGNOSTICS_AVAILABLE = False
+
 # Optional LLM integration (graceful degradation if not configured)
 try:
     from core.llm import get_llm, StructuredLLM
-    from agents.schemas import ImplementationPlan, CodeGeneration, TestGeneration
-    from agents.prompts import build_prompt
+    from agents.schemas import (
+        ImplementationPlan, CodeGeneration, TestGeneration,
+        DialectorOutput, AmbiguityMarker, ResearchArtifact, ResearchFinding,
+    )
+    from agents.prompts import build_prompt, build_dialector_prompt, build_researcher_prompt
     LLM_AVAILABLE = True
 except ImportError:
     LLM_AVAILABLE = False
+
+# Human-in-the-loop controller for user questions
+try:
+    from agents.human_loop import (
+        HumanLoopController, create_feedback_request, create_selection_request,
+        PauseType, RequestStatus,
+    )
+    HUMAN_LOOP_AVAILABLE = True
+except ImportError:
+    HUMAN_LOOP_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +79,11 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 class CyclePhase(str, Enum):
-    """TDD cycle phases."""
+    """TDD cycle phases - now includes Research/Dialectic."""
     INIT = "init"
+    DIALECTIC = "dialectic"      # Pre-research ambiguity check
+    CLARIFICATION = "clarification"  # Waiting for user answers
+    RESEARCH = "research"        # Socratic research loop
     PLAN = "plan"
     BUILD = "build"
     TEST = "test"
@@ -149,6 +172,13 @@ class GraphState(TypedDict):
     pending_human_input: Optional[str]
     human_response: Optional[str]
 
+    # Dialectic/Research phase state (replace)
+    ambiguities: Annotated[List[Dict[str, Any]], list_append_reducer]
+    clarification_questions: Annotated[List[Dict[str, Any]], list_append_reducer]
+    research_findings: Annotated[List[Dict[str, Any]], list_append_reducer]
+    dialectic_passed: bool
+    research_complete: bool
+
     # Errors (append)
     errors: Annotated[List[str], list_append_reducer]
 
@@ -166,15 +196,324 @@ def init_node(state: GraphState) -> Dict[str, Any]:
 
     - Validate inputs
     - Set up initial state
-    - Transition to PLAN
+    - Transition to DIALECTIC (pre-research ambiguity check)
     """
     return {
-        "phase": CyclePhase.PLAN.value,
+        "phase": CyclePhase.DIALECTIC.value,
         "messages": [{
             "role": "system",
             "content": f"Starting TDD cycle for task: {state.get('task_id', 'unknown')}"
         }],
         "iteration": 0,
+        "ambiguities": [],
+        "clarification_questions": [],
+        "research_findings": [],
+        "dialectic_passed": False,
+        "research_complete": False,
+    }
+
+
+def dialectic_node(state: GraphState) -> Dict[str, Any]:
+    """
+    Dialectic phase - pre-research ambiguity detection.
+
+    Analyzes the requirement for subjective terms, undefined references,
+    and missing context. Creates clarification questions if needed.
+
+    Flow:
+    - If CLEAR: proceed to RESEARCH
+    - If NEEDS_CLARIFICATION: proceed to CLARIFICATION (wait for user)
+    """
+    spec = state.get("spec", "")
+    session_id = state.get("session_id", "unknown")
+
+    messages = [{
+        "role": "assistant",
+        "content": "Analyzing requirement for ambiguity..."
+    }]
+
+    ambiguities = []
+    clarification_questions = []
+    next_phase = CyclePhase.RESEARCH.value  # Default: proceed to research
+
+    if LLM_AVAILABLE:
+        try:
+            llm = get_llm()
+
+            # Build dialector prompt
+            system_prompt = """You are the DIALECTOR agent. Analyze the requirement for ambiguity that would prevent autonomous code generation.
+
+Scan for:
+1. SUBJECTIVE TERMS: "fast", "efficient", "user-friendly"
+2. COMPARATIVE STATEMENTS: "faster than", "better than" (compared to what?)
+3. UNDEFINED PRONOUNS: "it", "this" without clear referent
+4. UNDEFINED TERMS: Domain-specific terms needing definition
+5. MISSING CONTEXT: Input/output format not specified
+
+For technical, well-defined requirements like "implement fibonacci" or "create a stack class", return verdict: CLEAR.
+Only flag as NEEDS_CLARIFICATION if there's genuine blocking ambiguity."""
+
+            user_prompt = f"""# Requirement to Analyze
+
+{spec}
+
+Analyze for ambiguity. Return structured output with verdict (CLEAR or NEEDS_CLARIFICATION) and any blocking ambiguities found."""
+
+            result = llm.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema=DialectorOutput,
+            )
+
+            # DialectorOutput has: is_clear, ambiguities, blocking_count, recommendation
+            # Override is_clear if blocking ambiguities were found (LLM sometimes says clear but lists blockers)
+            has_blocking = result.blocking_count > 0 or any(
+                getattr(a, 'impact', '').upper() == 'BLOCKING' for a in result.ambiguities
+            )
+            actually_clear = result.is_clear and not has_blocking and len(result.ambiguities) == 0
+
+            verdict = "CLEAR" if actually_clear else "NEEDS_CLARIFICATION"
+            messages.append({
+                "role": "assistant",
+                "content": f"Dialectic analysis: {verdict} ({result.recommendation}) - {result.blocking_count} blocking, {len(result.ambiguities)} total ambiguities"
+            })
+
+            if not actually_clear and result.ambiguities:
+                # Found ambiguities - generate clarification questions for each
+                # AmbiguityMarker has: category, text, impact, suggested_question
+                for amb in result.ambiguities:
+                    ambiguities.append({
+                        "text": amb.text,
+                        "category": amb.category,
+                        "impact": amb.impact,
+                        "question": amb.suggested_question,
+                    })
+
+                    # Treat ALL ambiguities as needing clarification
+                    # The impact field from LLM is often a description, not "BLOCKING"/"CLARIFYING"
+                    # Generate a question for each ambiguity
+                    question_text = amb.suggested_question
+                    if not question_text:
+                        # Generate question based on category
+                        if amb.category == "SUBJECTIVE_TERMS":
+                            question_text = f"What specific, measurable criteria define '{amb.text}'?"
+                        elif amb.category == "MISSING_CONTEXT":
+                            question_text = f"Please provide more details about: {amb.text}"
+                        elif amb.category == "COMPARATIVE_STATEMENTS":
+                            question_text = f"What is '{amb.text}' being compared to?"
+                        elif amb.category == "UNDEFINED_PRONOUN":
+                            question_text = f"What does '{amb.text}' refer to specifically?"
+                        else:
+                            question_text = f"Please clarify: {amb.text}"
+
+                    clarification_questions.append({
+                        "question": question_text,
+                        "category": amb.category,
+                        "text": amb.text,
+                    })
+
+                if clarification_questions:
+                    next_phase = CyclePhase.CLARIFICATION.value
+                    messages.append({
+                        "role": "assistant",
+                        "content": f"Found {len(clarification_questions)} blocking ambiguities. Waiting for user clarification."
+                    })
+
+        except Exception as e:
+            logger.warning(f"Dialectic analysis failed: {e}")
+            messages.append({
+                "role": "assistant",
+                "content": f"Dialectic analysis unavailable ({e}), proceeding to research"
+            })
+    else:
+        messages.append({
+            "role": "assistant",
+            "content": "LLM not configured, skipping dialectic analysis"
+        })
+
+    return {
+        "phase": next_phase,
+        "messages": messages,
+        "ambiguities": ambiguities,
+        "clarification_questions": clarification_questions,
+        "dialectic_passed": (next_phase == CyclePhase.RESEARCH.value),
+        "pending_human_input": "clarification" if next_phase == CyclePhase.CLARIFICATION.value else None,
+    }
+
+
+def clarification_node(state: GraphState) -> Dict[str, Any]:
+    """
+    Clarification phase - wait for and process user responses.
+
+    This node handles the human-in-the-loop interaction:
+    - Presents questions to user
+    - Waits for responses
+    - Incorporates feedback into the spec
+    """
+    questions = state.get("clarification_questions", [])
+    human_response = state.get("human_response", None)
+    spec = state.get("spec", "")
+
+    messages = []
+
+    if human_response:
+        # User has provided responses - incorporate them
+        messages.append({
+            "role": "user",
+            "content": f"User clarification: {human_response}"
+        })
+
+        # Augment the spec with clarifications
+        augmented_spec = f"""{spec}
+
+# User Clarifications
+{human_response}
+"""
+        messages.append({
+            "role": "assistant",
+            "content": "Clarifications received. Proceeding to research phase."
+        })
+
+        return {
+            "phase": CyclePhase.RESEARCH.value,
+            "messages": messages,
+            "spec": augmented_spec,
+            "dialectic_passed": True,
+            "pending_human_input": None,
+        }
+    else:
+        # Still waiting for user input - format questions for display
+        question_text = "Please clarify the following:\n\n"
+        for i, q in enumerate(questions, 1):
+            question_text += f"{i}. {q.get('question', q.get('phrase', 'Unknown'))}\n"
+            question_text += f"   (Category: {q.get('category', 'unknown')})\n\n"
+
+        messages.append({
+            "role": "assistant",
+            "content": question_text
+        })
+
+        # Stay in clarification phase waiting for input
+        return {
+            "phase": CyclePhase.CLARIFICATION.value,
+            "messages": messages,
+            "pending_human_input": "clarification",
+        }
+
+
+def research_node(state: GraphState) -> Dict[str, Any]:
+    """
+    Research phase - Socratic research loop.
+
+    Transforms the requirement into a structured Research Artifact:
+    - Input/output contracts
+    - Examples (happy path, edge case, error case)
+    - Complexity bounds
+    - Security considerations
+
+    This is the "sufficient statistic" for autonomous code generation.
+    """
+    spec = state.get("spec", "")
+    session_id = state.get("session_id", "unknown")
+
+    messages = [{
+        "role": "assistant",
+        "content": "Conducting research to create sufficient statistic..."
+    }]
+
+    research_findings = []
+    next_phase = CyclePhase.PLAN.value
+
+    if LLM_AVAILABLE:
+        try:
+            llm = get_llm()
+
+            system_prompt = """You are the RESEARCHER agent. Transform the requirement into a structured Research Artifact.
+
+Your artifact must include:
+1. Task category (greenfield, algorithmic, systems, etc.)
+2. Input/output contracts with Python types
+3. Happy path, edge case, and error case examples
+4. Complexity bounds (time and space)
+5. Security considerations (forbidden patterns, trust boundary)
+
+This Research Artifact is the "sufficient statistic" - it should contain everything needed to implement the code without further clarification."""
+
+            user_prompt = f"""# Requirement to Research
+
+{spec}
+
+Transform this into a structured Research Artifact with concrete examples, type contracts, and test specifications."""
+
+            result = llm.generate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema=ResearchArtifact,
+            )
+
+            # ResearchArtifact has: task_category, input_contract, output_contract,
+            # happy_path_examples, edge_cases, error_cases, complexity_bounds,
+            # security_posture, findings
+            research_findings.append({
+                "task_category": result.task_category,
+                "input_contract": result.input_contract,
+                "output_contract": result.output_contract,
+                "happy_path_count": len(result.happy_path_examples),
+                "edge_case_count": len(result.edge_cases),
+                "error_case_count": len(result.error_cases),
+                "complexity_bounds": result.complexity_bounds,
+                "security_posture": result.security_posture,
+                "findings_count": len(result.findings),
+            })
+
+            messages.append({
+                "role": "assistant",
+                "content": f"Research complete. Task: {result.task_category}. Examples: {len(result.happy_path_examples)} happy, {len(result.edge_cases)} edge, {len(result.error_cases)} error."
+            })
+
+            # Add research summary to spec for planning phase
+            research_summary = f"""
+# Research Artifact
+
+**Task Category:** {result.task_category}
+
+**Input Contract:** {result.input_contract}
+**Output Contract:** {result.output_contract}
+
+**Complexity:** {result.complexity_bounds or 'Not specified'}
+**Security:** {result.security_posture or 'Not specified'}
+
+**Happy Path Examples:**
+{chr(10).join(f'- {ex}' for ex in result.happy_path_examples) if result.happy_path_examples else 'None'}
+
+**Edge Cases:**
+{chr(10).join(f'- {ex}' for ex in result.edge_cases) if result.edge_cases else 'None'}
+
+**Error Cases:**
+{chr(10).join(f'- {ex}' for ex in result.error_cases) if result.error_cases else 'None'}
+"""
+            augmented_spec = f"{spec}\n{research_summary}"
+
+            return {
+                "phase": next_phase,
+                "messages": messages,
+                "spec": augmented_spec,
+                "research_findings": research_findings,
+                "research_complete": True,
+            }
+
+        except Exception as e:
+            logger.warning(f"Research phase failed: {e}")
+            messages.append({
+                "role": "assistant",
+                "content": f"Research unavailable ({e}), proceeding to planning"
+            })
+
+    return {
+        "phase": next_phase,
+        "messages": messages,
+        "research_findings": research_findings,
+        "research_complete": True,
     }
 
 
@@ -620,6 +959,35 @@ def failed_node(state: GraphState) -> Dict[str, Any]:
 # ROUTING FUNCTIONS (Conditional Edges)
 # =============================================================================
 
+def route_after_dialectic(state: GraphState) -> str:
+    """Route after dialectic analysis - to clarification if ambiguities found."""
+    ambiguities = state.get("ambiguities", [])
+    if ambiguities and not state.get("dialectic_passed", False):
+        return "clarification"
+    else:
+        return "research"
+
+
+def route_after_clarification(state: GraphState) -> str:
+    """Route after clarification - back to dialectic or forward to research."""
+    # If we have pending human input, we wait (handled by interrupt)
+    # Once human responds, we continue to research
+    if state.get("dialectic_passed", False):
+        return "research"
+    else:
+        # Re-check for more ambiguities after clarification
+        return "dialectic"
+
+
+def route_after_research(state: GraphState) -> str:
+    """Route after research - to plan when research is complete."""
+    if state.get("research_complete", False):
+        return "plan"
+    else:
+        # Continue research if not complete (for iterative research)
+        return "research"
+
+
 def route_after_test(state: GraphState) -> str:
     """Route based on test results."""
     if state.get("last_test_passed", False):
@@ -650,22 +1018,33 @@ def should_continue(state: GraphState) -> bool:
 
 def create_tdd_graph() -> StateGraph:
     """
-    Create the TDD orchestration StateGraph.
+    Create the TDD orchestration StateGraph with Research/Dialectic phases.
 
     Graph structure:
-        INIT -> PLAN -> BUILD -> TEST
-                          ^       |
-                          |       v
-                        FIX <-- [routing]
-                          |       |
-                          v       v
-                       FAILED   PASSED
+        INIT -> DIALECTIC -> [routing] -> CLARIFICATION (wait for human)
+                    ^            |              |
+                    |            v              v
+                    +---------- RESEARCH -> PLAN -> BUILD -> TEST
+                                                      ^       |
+                                                      |       v
+                                                    FIX <-- [routing]
+                                                      |       |
+                                                      v       v
+                                                   FAILED   PASSED
+
+    The Dialectic/Research loop ensures:
+    1. Ambiguities are detected before planning
+    2. User is asked clarifying questions
+    3. Research creates a "sufficient statistic" for autonomous generation
     """
     # Create graph with typed state schema
     graph = StateGraph(GraphState)
 
-    # Add nodes
+    # Add nodes - including new Dialectic/Research phases
     graph.add_node("init", init_node)
+    graph.add_node("dialectic", dialectic_node)
+    graph.add_node("clarification", clarification_node)
+    graph.add_node("research", research_node)
     graph.add_node("plan", plan_node)
     graph.add_node("build", build_node)
     graph.add_node("test", test_node)
@@ -673,8 +1052,40 @@ def create_tdd_graph() -> StateGraph:
     graph.add_node("passed", passed_node)
     graph.add_node("failed", failed_node)
 
-    # Add edges
-    graph.add_edge("init", "plan")
+    # Add edges - new flow: init -> dialectic -> clarification/research -> plan
+    graph.add_edge("init", "dialectic")
+
+    # Conditional routing after dialectic - to clarification if ambiguities found
+    graph.add_conditional_edges(
+        "dialectic",
+        route_after_dialectic,
+        {
+            "clarification": "clarification",
+            "research": "research",
+        }
+    )
+
+    # After clarification, route back to dialectic or forward to research
+    graph.add_conditional_edges(
+        "clarification",
+        route_after_clarification,
+        {
+            "dialectic": "dialectic",
+            "research": "research",
+        }
+    )
+
+    # After research, proceed to plan
+    graph.add_conditional_edges(
+        "research",
+        route_after_research,
+        {
+            "plan": "plan",
+            "research": "research",  # For iterative research
+        }
+    )
+
+    # Standard TDD flow continues
     graph.add_edge("plan", "build")
     graph.add_edge("build", "test")
 
@@ -826,11 +1237,27 @@ class TDDOrchestrator:
 
         config = {"configurable": {"thread_id": effective_session_id}}
 
+        # Initialize diagnostics for this run
+        if DIAGNOSTICS_AVAILABLE:
+            diag = get_diagnostics()
+            diag.set_session(effective_session_id)
+            diag.print_state_summary(use_color=False)  # Log initial state
+
         # Run to completion and collect final state
         final_state = initial_state.copy()
+        current_phase = None
         for event in self.graph.stream(initial_state, config):
             # Each event is {node_name: state_updates}
             for node_name, updates in event.items():
+                # Track phase transitions for diagnostics
+                if DIAGNOSTICS_AVAILABLE:
+                    new_phase = updates.get("phase")
+                    if new_phase and new_phase != current_phase:
+                        if current_phase is not None:
+                            diag.end_phase(success=True)
+                        diag.start_phase(new_phase.upper())
+                        current_phase = new_phase
+
                 # Merge updates into final_state
                 for key, value in updates.items():
                     if key in ("messages", "test_results", "artifacts",
@@ -841,6 +1268,13 @@ class TDDOrchestrator:
                     else:
                         # Scalars are replaced
                         final_state[key] = value
+
+        # End final phase and print summary
+        if DIAGNOSTICS_AVAILABLE:
+            if current_phase is not None:
+                success = final_state.get("final_status") == "passed"
+                diag.end_phase(success=success)
+            diag.print_summary(use_color=False)
 
         return final_state
 

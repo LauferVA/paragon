@@ -1,0 +1,281 @@
+# =============================================================================
+# PARAGON GOLDEN SET - Selected Tasks for System Validation
+# =============================================================================
+#
+# Derived from GAADP Golden Set v2.0
+# Selected for maximum coverage of Paragon's differentiating features:
+# - Multi-file dependencies (Graph Tasks)
+# - Full TDD cycle (Architect Tasks)
+# - Research/Dialectic interaction
+#
+# =============================================================================
+
+version: "1.0"
+created: "2025-12-06"
+
+# Priority tiers for progressive testing
+tiers:
+  smoke: ["builder_001"]  # Quick validation
+  core: ["architect_001", "graph_001", "graph_002"]  # Core features
+  full: ["graph_001", "graph_002", "graph_003", "graph_004", "graph_005"]  # Multi-file
+  stress: ["architect_004", "architect_008", "architect_009"]  # Complex structures
+
+tasks:
+  # ===========================================================================
+  # SMOKE TEST - Quick validation
+  # ===========================================================================
+
+  - id: builder_001
+    name: "Fibonacci with Error Handling"
+    type: builder
+    difficulty: easy
+    features_tested: ["tdd_cycle", "error_handling", "syntax_validation"]
+    input: |
+      Create a Python file `fib.py` that implements a function `fibonacci(n)` which:
+      1. Returns the n-th Fibonacci number (0-indexed, so fibonacci(0)=0, fibonacci(1)=1)
+      2. Raises a `ValueError` with message "n must be non-negative" for negative inputs
+      3. Uses iterative approach (not recursive) for efficiency
+    success_criteria:
+      - status: "VERIFIED"
+      - contains: ["raise ValueError", "def fibonacci"]
+    config:
+      max_iterations: 8
+      max_cost_usd: 0.20
+      timeout_seconds: 120
+
+  # ===========================================================================
+  # CORE TESTS - Essential feature coverage
+  # ===========================================================================
+
+  - id: architect_001
+    name: "BankAccount Class Design"
+    type: architect
+    difficulty: medium
+    features_tested: ["spec_decomposition", "tdd_cycle", "state_management", "research_phase"]
+    input: |
+      Design a Python class `BankAccount` with the following methods:
+      - `__init__(self, owner: str, initial_balance: float = 0)`
+      - `deposit(self, amount: float) -> float` - adds amount, returns new balance
+      - `withdraw(self, amount: float) -> float` - subtracts amount, returns new balance
+      - `audit(self) -> dict` - returns {"owner": str, "balance": float, "transactions": int}
+
+      The class should track the number of transactions (deposits + withdrawals).
+      Withdrawals should raise ValueError if amount exceeds balance.
+    success_criteria:
+      - status: "VERIFIED"
+      - node_types: ["SPEC", "CODE", "TEST"]
+      - contains: ["deposit", "withdraw", "audit"]
+    config:
+      max_iterations: 10
+      max_cost_usd: 0.25
+      timeout_seconds: 180
+
+  # ===========================================================================
+  # GRAPH TESTS - Multi-file dependencies (Paragon's differentiator)
+  # ===========================================================================
+
+  - id: graph_001
+    name: "Utils Module with Importer"
+    type: graph
+    difficulty: medium
+    features_tested: ["multi_file", "depends_on_edges", "wave_computation", "import_tracking"]
+    input: |
+      Create two Python files:
+
+      1. `utils.py` - A utility module containing:
+         - `format_name(first: str, last: str) -> str` that returns "Last, First"
+         - `calculate_age(birth_year: int) -> int` that returns current year minus birth year
+
+      2. `main.py` - A main module that:
+         - Imports from utils.py
+         - Has a function `greet_user(first: str, last: str, birth_year: int) -> str`
+           that uses both utility functions to return a greeting
+    success_criteria:
+      - status: "VERIFIED"
+      - edge_types: ["DEPENDS_ON", "IMPLEMENTS"]
+      - file_count: 2
+      - contains: ["import"]
+    config:
+      max_iterations: 12
+      max_cost_usd: 0.35
+      timeout_seconds: 240
+
+  - id: graph_002
+    name: "Config and Logger"
+    type: graph
+    difficulty: medium
+    features_tested: ["multi_file", "depends_on_edges", "configuration_pattern"]
+    input: |
+      Create two Python files:
+
+      1. `config.py` - Configuration module with:
+         - `LOG_LEVEL = "INFO"`
+         - `APP_NAME = "MyApp"`
+         - `get_config() -> dict` returning all config as dict
+
+      2. `logger.py` - Logger module that:
+         - Imports config.py
+         - `setup_logger()` - configures logging using config values
+         - `log(message)` - logs message with APP_NAME prefix
+    success_criteria:
+      - status: "VERIFIED"
+      - edge_types: ["DEPENDS_ON"]
+    config:
+      max_iterations: 10
+      max_cost_usd: 0.30
+      timeout_seconds: 180
+
+  - id: graph_003
+    name: "Model and Repository"
+    type: graph
+    difficulty: medium
+    features_tested: ["multi_file", "class_relationships", "data_layer_pattern"]
+    input: |
+      Create two Python files:
+
+      1. `models.py` - Data models:
+         - `User` class with `id`, `name`, `email` attributes
+         - `to_dict()` method
+
+      2. `repository.py` - Data access:
+         - Imports User from models.py
+         - `UserRepository` class with `add(user)`, `find(id)`, `all()` methods
+    success_criteria:
+      - status: "VERIFIED"
+      - edge_types: ["DEPENDS_ON"]
+    config:
+      max_iterations: 12
+      max_cost_usd: 0.35
+      timeout_seconds: 240
+
+  - id: graph_004
+    name: "Validator and Form"
+    type: graph
+    difficulty: medium
+    features_tested: ["multi_file", "validation_pattern", "composition"]
+    input: |
+      Create two Python files:
+
+      1. `validators.py` - Validation functions:
+         - `validate_email(email)` - returns True if valid email format
+         - `validate_phone(phone)` - returns True if valid phone format
+
+      2. `forms.py` - Form handling:
+         - Imports validators
+         - `ContactForm` class that uses validators to validate input
+         - `is_valid()` method that checks all fields
+    success_criteria:
+      - status: "VERIFIED"
+      - edge_types: ["DEPENDS_ON"]
+    config:
+      max_iterations: 12
+      max_cost_usd: 0.35
+      timeout_seconds: 240
+
+  - id: graph_005
+    name: "Database and Service"
+    type: graph
+    difficulty: hard
+    features_tested: ["multi_file", "abstraction_layers", "crud_pattern"]
+    input: |
+      Create two Python files:
+
+      1. `database.py` - Database abstraction:
+         - `Database` class with `connect()`, `execute(query)`, `close()`
+         - Simulates a database connection (can use dict storage)
+
+      2. `service.py` - Business logic:
+         - Imports Database
+         - `ProductService` class using database for CRUD operations
+         - Methods: `create(product)`, `get(id)`, `update(id, data)`, `delete(id)`
+    success_criteria:
+      - status: "VERIFIED"
+      - edge_types: ["DEPENDS_ON"]
+    config:
+      max_iterations: 14
+      max_cost_usd: 0.40
+      timeout_seconds: 300
+
+  # ===========================================================================
+  # STRESS TESTS - Complex data structures
+  # ===========================================================================
+
+  - id: architect_004
+    name: "LinkedList Implementation"
+    type: architect
+    difficulty: hard
+    features_tested: ["recursive_structures", "pointer_logic", "edge_cases"]
+    input: |
+      Design a Python class `LinkedList` with:
+      - `append(value)` - adds node to end
+      - `prepend(value)` - adds node to beginning
+      - `find(value)` - returns node with value or None
+      - `delete(value)` - removes first node with value
+      - `to_list()` - returns Python list of all values
+    success_criteria:
+      - status: "VERIFIED"
+      - contains: ["append", "find", "delete"]
+    config:
+      max_iterations: 10
+      max_cost_usd: 0.25
+      timeout_seconds: 180
+
+  - id: architect_008
+    name: "Graph Adjacency List"
+    type: architect
+    difficulty: hard
+    features_tested: ["graph_structures", "bfs_algorithm", "meta_validation"]
+    input: |
+      Design a Python class `Graph` with:
+      - `add_vertex(v)` - adds a vertex
+      - `add_edge(v1, v2, weight=1)` - adds edge between vertices
+      - `get_neighbors(v)` - returns list of neighbors
+      - `has_path(start, end)` - returns True if path exists (BFS)
+    success_criteria:
+      - status: "VERIFIED"
+      - contains: ["add_vertex", "add_edge", "has_path"]
+    config:
+      max_iterations: 10
+      max_cost_usd: 0.25
+      timeout_seconds: 180
+
+  - id: architect_009
+    name: "LRU Cache"
+    type: architect
+    difficulty: hard
+    features_tested: ["eviction_logic", "state_management", "performance"]
+    input: |
+      Design a Python class `LRUCache` with:
+      - `__init__(capacity)` - creates cache with max capacity
+      - `get(key)` - returns value, moves to most recent
+      - `put(key, value)` - adds/updates, evicts least recent if full
+      - `size()` - returns current number of items
+    success_criteria:
+      - status: "VERIFIED"
+      - contains: ["get", "put", "capacity"]
+    config:
+      max_iterations: 10
+      max_cost_usd: 0.25
+      timeout_seconds: 180
+
+# =============================================================================
+# METADATA
+# =============================================================================
+
+metadata:
+  total_tasks: 9
+  task_types:
+    builder: 1
+    architect: 4
+    graph: 4
+  estimated_cost_usd: 2.70
+  estimated_time_minutes: 30
+  features_coverage:
+    - tdd_cycle
+    - multi_file
+    - depends_on_edges
+    - wave_computation
+    - research_phase
+    - dialectic_interaction
+    - syntax_validation
+    - state_management

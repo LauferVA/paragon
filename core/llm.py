@@ -595,6 +595,13 @@ CRITICAL RULES:
         estimated_tokens = self._estimate_tokens(full_system_prompt, user_prompt)
         guard.wait_if_needed(estimated_tokens)
 
+        # Diagnostic tracking
+        start_time = time.time()
+        input_tokens = 0
+        output_tokens = 0
+        truncated = False
+        error_msg = None
+
         try:
             # LiteLLM handles provider differences
             response = litellm.completion(
@@ -615,19 +622,39 @@ CRITICAL RULES:
             content = self._clean_response(content)
 
             # Record actual usage for rate limiting
-            actual_tokens = response.usage.prompt_tokens if response.usage else estimated_tokens
-            guard.record_usage(actual_tokens)
+            if response.usage:
+                input_tokens = response.usage.prompt_tokens
+                output_tokens = response.usage.completion_tokens
+            guard.record_usage(input_tokens or estimated_tokens)
 
             # Validation Step (The "Gatekeeper")
             # msgspec is strict by default on types
-            return msgspec.json.decode(content.encode("utf-8"), type=schema)
+            result = msgspec.json.decode(content.encode("utf-8"), type=schema)
+
+            # Record successful call to diagnostics
+            self._record_diagnostic(
+                schema.__name__, start_time, input_tokens, output_tokens,
+                success=True, truncated=False, error=None
+            )
+            return result
 
         except msgspec.ValidationError as e:
+            error_msg = f"Schema validation failed: {e}"
+            self._record_diagnostic(
+                schema.__name__, start_time, input_tokens, output_tokens,
+                success=False, truncated=False, error=error_msg
+            )
             # This triggers the @retry decorator
-            raise ValidationError(f"Schema validation failed: {e}")
+            raise ValidationError(error_msg)
         except msgspec.DecodeError as e:
-            # Invalid JSON structure
-            raise ValidationError(f"JSON decode failed: {e}")
+            # Check for truncation
+            error_msg = f"JSON decode failed: {e}"
+            truncated = "truncated" in str(e).lower()
+            self._record_diagnostic(
+                schema.__name__, start_time, input_tokens, output_tokens,
+                success=False, truncated=truncated, error=error_msg
+            )
+            raise ValidationError(error_msg)
         except litellm.RateLimitError as e:
             # Extract retry-after from headers if available
             retry_after = getattr(e, 'retry_after', None)
@@ -649,18 +676,68 @@ CRITICAL RULES:
                     )
                     content = response.choices[0].message.content
                     content = self._clean_response(content)
-                    actual_tokens = response.usage.prompt_tokens if response.usage else estimated_tokens
-                    guard.record_usage(actual_tokens)
-                    return msgspec.json.decode(content.encode("utf-8"), type=schema)
+                    if response.usage:
+                        input_tokens = response.usage.prompt_tokens
+                        output_tokens = response.usage.completion_tokens
+                    guard.record_usage(input_tokens or estimated_tokens)
+                    result = msgspec.json.decode(content.encode("utf-8"), type=schema)
+                    self._record_diagnostic(
+                        schema.__name__, start_time, input_tokens, output_tokens,
+                        success=True, truncated=False, error=None
+                    )
+                    return result
                 except Exception:
                     pass  # Fall through to raise
+            self._record_diagnostic(
+                schema.__name__, start_time, input_tokens, output_tokens,
+                success=False, truncated=False, error=f"Rate limited: {e}"
+            )
             raise RateLimitError(f"Rate limited: {e}")
         except RetryError:
             # All retries exhausted
-            raise ValidationError(f"Schema validation failed after 3 attempts for {schema.__name__}")
+            error_msg = f"Schema validation failed after 3 attempts for {schema.__name__}"
+            self._record_diagnostic(
+                schema.__name__, start_time, input_tokens, output_tokens,
+                success=False, truncated=False, error=error_msg
+            )
+            raise ValidationError(error_msg)
         except Exception as e:
             # API outage, network error, etc.
-            raise LLMError(f"LLM generation failed: {e}")
+            error_msg = f"LLM generation failed: {e}"
+            self._record_diagnostic(
+                schema.__name__, start_time, input_tokens, output_tokens,
+                success=False, truncated=False, error=error_msg
+            )
+            raise LLMError(error_msg)
+
+    def _record_diagnostic(
+        self,
+        schema_name: str,
+        start_time: float,
+        input_tokens: int,
+        output_tokens: int,
+        success: bool,
+        truncated: bool,
+        error: Optional[str],
+    ) -> None:
+        """Record LLM call to diagnostics (if available)."""
+        try:
+            from infrastructure.diagnostics import get_diagnostics
+            dx = get_diagnostics()
+            duration_ms = (time.time() - start_time) * 1000
+            dx.record_llm_call_simple(
+                schema_name=schema_name,
+                duration_ms=duration_ms,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                success=success,
+                truncated=truncated,
+                error=error,
+            )
+        except ImportError:
+            pass  # Diagnostics not available
+        except Exception:
+            pass  # Don't let diagnostics break LLM calls
 
     def generate_with_history(
         self,

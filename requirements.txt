@@ -66,3 +66,21 @@ rerun-sdk>=0.18.0          # Visual debugging and temporal replay
 # -----------------------------------------------------------------------------
 # anthropic>=0.18.0        # Anthropic Claude SDK
 # openai>=1.0.0            # OpenAI SDK
+
+# =============================================================================
+# ENVIRONMENT VARIABLES (Required/Recommended)
+# =============================================================================
+# Set these in your shell profile (.bashrc, .zshrc) or .env file:
+#
+# REQUIRED for Researcher module:
+#   TAVILY_API_KEY          - Tavily web search API key (https://tavily.com)
+#
+# REQUIRED for LLM features:
+#   ANTHROPIC_API_KEY       - Anthropic Claude API key (https://console.anthropic.com)
+#   OR
+#   OPENAI_API_KEY          - OpenAI API key (https://platform.openai.com)
+#
+# OPTIONAL for local LLM routing:
+#   OLLAMA_HOST             - Ollama server URL (default: http://localhost:11434)
+#
+# =============================================================================

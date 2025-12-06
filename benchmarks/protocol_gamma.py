@@ -527,5 +527,5 @@ def run_tests() -> Tuple[int, int, List[str]]:
 
 
 if __name__ == "__main__":
-    passed, failed, _ = run_tests()
-    sys.exit(0 if failed == 0 else 1)
+    passed, total, failures = run_tests()
+    sys.exit(0 if len(failures) == 0 else 1)
