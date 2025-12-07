@@ -116,6 +116,21 @@ def _get_rerun_logger():
     return _rerun_logger
 
 
+_edge_case_collector = None  # Lazy-initialized EdgeCaseCollector
+
+
+def _get_edge_case_collector():
+    """Get or create the EdgeCaseCollector instance (lazy initialization)."""
+    global _edge_case_collector
+    if _edge_case_collector is None:
+        try:
+            from infrastructure.edge_cases import EdgeCaseCollector
+            _edge_case_collector = EdgeCaseCollector()
+        except ImportError:
+            pass  # EdgeCaseCollector not available
+    return _edge_case_collector
+
+
 def _record_attribution(
     session_id: str,
     signature,
@@ -1401,16 +1416,56 @@ def add_node_safe(
         If signature is provided, it will be stored in the node's metadata
         under the key '_signature_chain' as a SignatureChain object.
     """
+    import time as _time
+    import ast as _ast
+
     db = get_db()
     violations = []
+    _start_time = _time.time()
 
     # Step 1: Syntax check for CODE nodes
     syntax_valid = True
+    tree_sitter_valid = None
+    ast_valid = None
+    ast_errors = []
+
     if node_type == NodeType.CODE.value:
         syntax_result = check_syntax(content, "python")
         syntax_valid = syntax_result.valid
+        tree_sitter_valid = syntax_result.valid
         if not syntax_valid:
             violations.extend(syntax_result.errors)
+
+        # Also check with ast.parse() for edge case detection
+        try:
+            _ast.parse(content)
+            ast_valid = True
+        except SyntaxError as e:
+            ast_valid = False
+            ast_errors.append(str(e))
+        except Exception as e:
+            ast_valid = False
+            ast_errors.append(f"Unexpected: {e}")
+
+        # Log edge case if parser divergence detected
+        if tree_sitter_valid != ast_valid:
+            collector = _get_edge_case_collector()
+            if collector:
+                try:
+                    from infrastructure.edge_cases import EdgeCaseObservation
+                    obs = EdgeCaseObservation(
+                        node_id="pending",  # Node not created yet
+                        code_snippet=content[:500] if content else "",
+                        tree_sitter_valid=tree_sitter_valid,
+                        ast_valid=ast_valid,
+                        tree_sitter_errors=syntax_result.errors if not tree_sitter_valid else [],
+                        ast_errors=ast_errors,
+                        syntax_valid=syntax_valid,
+                        created_by=created_by,
+                    )
+                    collector.check_and_store(obs)
+                except Exception:
+                    pass  # Don't let edge case logging break main flow
 
     # If syntax fails, don't proceed
     if not syntax_valid:

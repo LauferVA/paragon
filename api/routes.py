@@ -1180,6 +1180,221 @@ async def run_orchestrator_phase(request: Request) -> JSONResponse:
 
 
 # =============================================================================
+# EDGE CASE ENDPOINTS
+# =============================================================================
+
+_edge_case_collector = None
+
+
+def _get_edge_case_collector():
+    """Get or create the EdgeCaseCollector instance."""
+    global _edge_case_collector
+    if _edge_case_collector is None:
+        try:
+            from infrastructure.edge_cases import EdgeCaseCollector
+            _edge_case_collector = EdgeCaseCollector()
+        except ImportError:
+            pass
+    return _edge_case_collector
+
+
+async def list_edge_cases(request: Request) -> JSONResponse:
+    """
+    List edge cases with optional filters.
+
+    Query params:
+        project_id: Filter by project
+        session_id: Filter by session
+        category: Filter by category (e.g., "parser_divergence")
+        severity: Filter by severity ("low", "medium", "high", "critical")
+        resolved: Filter by resolution status (true/false)
+        limit: Max results (default 100)
+    """
+    collector = _get_edge_case_collector()
+    if not collector:
+        return error_response("Edge case collector not available", status_code=503)
+
+    try:
+        params = dict(request.query_params)
+
+        # Parse query params
+        project_id = params.get("project_id")
+        session_id = params.get("session_id")
+        category = params.get("category")
+        severity = params.get("severity")
+        resolved_str = params.get("resolved")
+        limit = int(params.get("limit", "100"))
+
+        resolved = None
+        if resolved_str is not None:
+            resolved = resolved_str.lower() == "true"
+
+        # Query
+        cases = collector.query(
+            project_id=project_id,
+            session_id=session_id,
+            category=category,
+            severity=severity,
+            resolved=resolved,
+            limit=limit,
+        )
+
+        return JSONResponse({
+            "edge_cases": [
+                {
+                    "edge_case_id": c.edge_case_id,
+                    "node_id": c.node_id,
+                    "session_id": c.session_id,
+                    "project_id": c.project_id,
+                    "categories": c.categories,
+                    "severity": c.severity,
+                    "source": c.source,
+                    "code_snippet": c.code_snippet[:200] + "..." if len(c.code_snippet) > 200 else c.code_snippet,
+                    "description": c.description,
+                    "detected_at": c.detected_at,
+                    "resolved": c.resolved,
+                    "flagged_by": c.flagged_by,
+                    "flag_reason": c.flag_reason,
+                }
+                for c in cases
+            ],
+            "count": len(cases),
+        })
+
+    except Exception as e:
+        return error_response(f"Query error: {e}", status_code=500)
+
+
+async def get_edge_case(request: Request) -> JSONResponse:
+    """Get a specific edge case by ID."""
+    collector = _get_edge_case_collector()
+    if not collector:
+        return error_response("Edge case collector not available", status_code=503)
+
+    edge_case_id = request.path_params.get("edge_case_id", "")
+
+    try:
+        case = collector.store.get(edge_case_id)
+        if not case:
+            return error_response(f"Edge case {edge_case_id} not found", status_code=404)
+
+        return JSONResponse({
+            "edge_case_id": case.edge_case_id,
+            "node_id": case.node_id,
+            "session_id": case.session_id,
+            "project_id": case.project_id,
+            "categories": case.categories,
+            "severity": case.severity,
+            "source": case.source,
+            "code_snippet": case.code_snippet,
+            "description": case.description,
+            "detection_details": case.detection_details,
+            "detected_at": case.detected_at,
+            "resolved": case.resolved,
+            "resolution_notes": case.resolution_notes,
+            "resolved_at": case.resolved_at,
+            "flagged_by": case.flagged_by,
+            "flag_reason": case.flag_reason,
+        })
+
+    except Exception as e:
+        return error_response(f"Error: {e}", status_code=500)
+
+
+async def flag_edge_case(request: Request) -> JSONResponse:
+    """
+    Manually flag something as an edge case.
+
+    Body:
+        node_id: str - Node ID (or "manual" for unattached)
+        code_snippet: str - The code or content
+        reason: str - Why this is interesting
+        flagged_by: str - Who is flagging
+        session_id: str (optional)
+        project_id: str (optional)
+    """
+    collector = _get_edge_case_collector()
+    if not collector:
+        return error_response("Edge case collector not available", status_code=503)
+
+    try:
+        body = await request.json()
+
+        node_id = body.get("node_id", "manual")
+        code_snippet = body.get("code_snippet", "")
+        reason = body.get("reason", "")
+        flagged_by = body.get("flagged_by", "unknown")
+        session_id = body.get("session_id", "")
+        project_id = body.get("project_id", "")
+
+        if not reason:
+            return error_response("reason is required", status_code=400)
+
+        case = collector.flag_manually(
+            node_id=node_id,
+            code_snippet=code_snippet,
+            reason=reason,
+            flagged_by=flagged_by,
+            session_id=session_id,
+            project_id=project_id,
+        )
+
+        return JSONResponse({
+            "success": True,
+            "edge_case_id": case.edge_case_id,
+            "message": "Edge case flagged successfully",
+        })
+
+    except Exception as e:
+        return error_response(f"Error: {e}", status_code=500)
+
+
+async def resolve_edge_case(request: Request) -> JSONResponse:
+    """
+    Mark an edge case as resolved.
+
+    Body:
+        notes: str (optional) - Resolution notes
+    """
+    collector = _get_edge_case_collector()
+    if not collector:
+        return error_response("Edge case collector not available", status_code=503)
+
+    edge_case_id = request.path_params.get("edge_case_id", "")
+
+    try:
+        body = await request.json()
+        notes = body.get("notes", "")
+
+        success = collector.store.mark_resolved(edge_case_id, notes)
+        if not success:
+            return error_response(f"Edge case {edge_case_id} not found", status_code=404)
+
+        return JSONResponse({
+            "success": True,
+            "edge_case_id": edge_case_id,
+            "message": "Edge case resolved",
+        })
+
+    except Exception as e:
+        return error_response(f"Error: {e}", status_code=500)
+
+
+async def edge_case_summary(request: Request) -> JSONResponse:
+    """Get summary statistics of edge cases."""
+    collector = _get_edge_case_collector()
+    if not collector:
+        return error_response("Edge case collector not available", status_code=503)
+
+    try:
+        summary = collector.get_summary()
+        return JSONResponse(summary)
+
+    except Exception as e:
+        return error_response(f"Error: {e}", status_code=500)
+
+
+# =============================================================================
 # APP FACTORY
 # =============================================================================
 
@@ -1225,6 +1440,13 @@ def create_routes() -> List[Route]:
         # Orchestrator session management
         Route("/api/orchestrator/sessions", start_orchestrator_session, methods=["POST"]),
         Route("/api/orchestrator/run", run_orchestrator_phase, methods=["POST"]),
+
+        # Edge case tracking
+        Route("/api/edge-cases", list_edge_cases, methods=["GET"]),
+        Route("/api/edge-cases/summary", edge_case_summary, methods=["GET"]),
+        Route("/api/edge-cases/flag", flag_edge_case, methods=["POST"]),
+        Route("/api/edge-cases/{edge_case_id}", get_edge_case, methods=["GET"]),
+        Route("/api/edge-cases/{edge_case_id}/resolve", resolve_edge_case, methods=["POST"]),
     ]
 
 
