@@ -221,17 +221,31 @@ def test_get_node_tool(fresh_db):
 # WAVE ANALYSIS TESTS
 # =============================================================================
 
-def test_get_waves_tool(sample_graph):
+def test_get_waves_tool(db_with_sample_nodes):
     """
     Validate that get_waves tool computes execution layers correctly.
 
-    Uses the sample_graph fixture which has a REQ->SPEC->CODE structure.
+    Uses the db_with_sample_nodes fixture which has a REQ, SPEC, CODE structure.
 
     Verifies:
     - Tool returns success=True
     - Layer count is correct
     - Layers contain node IDs
     """
+    from agents.tools import set_db
+
+    db, nodes = db_with_sample_nodes
+
+    # Add edges to create dependency chain: REQ -> SPEC -> CODE
+    from core.schemas import EdgeData
+    from core.ontology import EdgeType
+
+    db.add_edge(EdgeData.create(nodes["req"].id, nodes["spec"].id, EdgeType.TRACES_TO.value))
+    db.add_edge(EdgeData.create(nodes["spec"].id, nodes["code"].id, EdgeType.TRACES_TO.value))
+
+    # Set this db as global
+    set_db(db)
+
     result = get_waves()
 
     assert result.success is True
@@ -441,27 +455,32 @@ def test_check_cycle_no_cycle(fresh_db):
 
 def test_check_cycle_with_cycle(fresh_db):
     """
-    Validate that check_cycle correctly detects cycles.
+    Validate that cycle-creating edges are rejected at write time.
 
-    Verifies:
-    - Tool returns success=True
-    - has_cycle=True when cycle exists
-    - Message indicates cycle detected
+    The graph has built-in cycle prevention - edges that would create
+    cycles are rejected in add_edge. This test verifies that:
+    - Cycle-creating edges return success=False
+    - The graph remains acyclic after the rejection
     """
-    # Create cycle: A -> B -> C -> A
+    # Create chain: A -> B -> C
     nodeA = add_node(NodeType.CODE.value, "A")
     nodeB = add_node(NodeType.CODE.value, "B")
     nodeC = add_node(NodeType.CODE.value, "C")
 
     add_edge(nodeA.node_id, nodeB.node_id, EdgeType.DEPENDS_ON.value)
     add_edge(nodeB.node_id, nodeC.node_id, EdgeType.DEPENDS_ON.value)
-    add_edge(nodeC.node_id, nodeA.node_id, EdgeType.DEPENDS_ON.value)
 
-    result = check_cycle()
+    # Attempt to create cycle: C -> A (should be rejected)
+    result = add_edge(nodeC.node_id, nodeA.node_id, EdgeType.DEPENDS_ON.value)
 
-    assert result.success is True
-    assert result.has_cycle is True
+    # Edge creation should fail due to cycle prevention
+    assert result.success is False
     assert "cycle" in result.message.lower()
+
+    # Graph should still be acyclic
+    cycle_result = check_cycle()
+    assert cycle_result.success is True
+    assert cycle_result.has_cycle is False
 
 
 # =============================================================================

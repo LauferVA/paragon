@@ -490,24 +490,34 @@ def test_has_cycle_acyclic_graph(fresh_db):
 
 def test_has_cycle_cyclic_graph(fresh_db):
     """
-    Validate that has_cycle returns True for graph with cycle.
+    Validate that cycle-creating edges are rejected at write time.
+
+    The graph has built-in cycle prevention - add_edge raises
+    GraphInvariantError when an edge would create a cycle.
 
     Verifies:
-    - Cycle is correctly detected
-    - Graph with cycle is not a DAG
+    - Cycle-creating edges raise GraphInvariantError
+    - Graph remains acyclic after rejection
     """
+    from core.graph_db import GraphInvariantError
+
     node1 = NodeData.create(type=NodeType.CODE.value, content="Code 1")
     node2 = NodeData.create(type=NodeType.CODE.value, content="Code 2")
     node3 = NodeData.create(type=NodeType.CODE.value, content="Code 3")
 
     fresh_db.add_nodes_batch([node1, node2, node3])
 
-    # Create cycle: 1 -> 2 -> 3 -> 1
+    # Create chain: 1 -> 2 -> 3
     fresh_db.add_edge(EdgeData.create(node1.id, node2.id, EdgeType.DEPENDS_ON.value))
     fresh_db.add_edge(EdgeData.create(node2.id, node3.id, EdgeType.DEPENDS_ON.value))
-    fresh_db.add_edge(EdgeData.create(node3.id, node1.id, EdgeType.DEPENDS_ON.value))
 
-    assert fresh_db.has_cycle()
+    # Attempt to create cycle: 3 -> 1 (should raise)
+    import pytest
+    with pytest.raises(GraphInvariantError, match="cycle"):
+        fresh_db.add_edge(EdgeData.create(node3.id, node1.id, EdgeType.DEPENDS_ON.value))
+
+    # Graph should still be acyclic
+    assert not fresh_db.has_cycle()
 
 
 # =============================================================================
