@@ -47,6 +47,12 @@ class NodeType(str, Enum):
     CLASS = "CLASS"                  # Class definition
     FUNCTION = "FUNCTION"            # Function/method definition
     CALL = "CALL"                    # Function call site
+    # Graph-Native Configuration Types (Wave 1 Refactor)
+    CONFIG = "CONFIG"                # System configuration node
+    AGENT_CONFIG = "AGENT_CONFIG"    # Agent-specific configuration
+    RESOURCE_POLICY = "RESOURCE_POLICY"  # Resource constraint policies
+    SESSION = "SESSION"              # Session context holder
+    RATE_LIMIT_EVENT = "RATE_LIMIT_EVENT"  # Rate limit tracking event
 
 
 class EdgeType(str, Enum):
@@ -65,6 +71,12 @@ class EdgeType(str, Enum):
     CONTAINS = "CONTAINS"            # Containment: parent -> child
     REFERENCES = "REFERENCES"        # Reference: caller -> callee
     INHERITS = "INHERITS"            # Inheritance: subclass -> superclass
+    # Graph-Native Configuration Edges (Wave 1 Refactor)
+    CONFIGURED_BY = "CONFIGURED_BY"  # Configuration: node -> CONFIG/AGENT_CONFIG
+    ENFORCES = "ENFORCES"            # Policy: RESOURCE_POLICY -> constraint target
+    APPLIES_TO = "APPLIES_TO"        # Scope: CONFIG -> target nodes/types
+    RATE_LIMITED_BY = "RATE_LIMITED_BY"  # Rate limit: request -> RATE_LIMIT_EVENT
+    SESSION_CONTAINS = "SESSION_CONTAINS"  # Session membership: SESSION -> nodes
 
 
 class NodeStatus(str, Enum):
@@ -367,6 +379,90 @@ TOPOLOGY_CONSTRAINTS: Dict[str, TopologyConstraint] = {
             NodeStatus.PROCESSING.value,
             NodeStatus.VERIFIED.value,
             NodeStatus.FAILED.value,
+        ),
+    ),
+
+    # =========================================================================
+    # GRAPH-NATIVE CONFIGURATION TYPES (Wave 1 Refactor)
+    # =========================================================================
+
+    # CONFIG - System Configuration Node
+    NodeType.CONFIG.value: TopologyConstraint(
+        node_type=NodeType.CONFIG.value,
+        description="System configuration stored as graph node. Content is JSON of settings.",
+        edge_constraints=(
+            EdgeConstraint(
+                edge_type=EdgeType.APPLIES_TO.value,
+                direction="outgoing",
+                min_count=0,  # Optional - can be global config
+                mode=ConstraintMode.SOFT.value,
+            ),
+        ),
+        allowed_statuses=(
+            NodeStatus.VERIFIED.value,  # Config should be stable
+        ),
+    ),
+
+    # AGENT_CONFIG - Agent-Specific Configuration
+    NodeType.AGENT_CONFIG.value: TopologyConstraint(
+        node_type=NodeType.AGENT_CONFIG.value,
+        description="Agent-specific configuration. Overrides system CONFIG for specific agents.",
+        edge_constraints=(
+            EdgeConstraint(
+                edge_type=EdgeType.APPLIES_TO.value,
+                direction="outgoing",
+                min_count=1,  # Must specify which agent(s) this applies to
+                mode=ConstraintMode.SOFT.value,
+            ),
+        ),
+        allowed_statuses=(
+            NodeStatus.VERIFIED.value,
+        ),
+    ),
+
+    # RESOURCE_POLICY - Resource Constraint Policies
+    NodeType.RESOURCE_POLICY.value: TopologyConstraint(
+        node_type=NodeType.RESOURCE_POLICY.value,
+        description="Resource constraints (RAM, CPU thresholds). ENFORCES edge to constrained nodes.",
+        edge_constraints=(
+            EdgeConstraint(
+                edge_type=EdgeType.ENFORCES.value,
+                direction="outgoing",
+                min_count=0,  # Can be global policy
+                mode=ConstraintMode.SOFT.value,
+            ),
+        ),
+        allowed_statuses=(
+            NodeStatus.VERIFIED.value,
+        ),
+    ),
+
+    # SESSION - Session Context Holder
+    NodeType.SESSION.value: TopologyConstraint(
+        node_type=NodeType.SESSION.value,
+        description="Session context. Contains nodes created during this session.",
+        edge_constraints=(
+            EdgeConstraint(
+                edge_type=EdgeType.SESSION_CONTAINS.value,
+                direction="outgoing",
+                min_count=0,  # Empty sessions allowed
+                mode=ConstraintMode.SOFT.value,
+            ),
+        ),
+        allowed_statuses=(
+            NodeStatus.PROCESSING.value,  # Active session
+            NodeStatus.VERIFIED.value,    # Completed session
+            NodeStatus.FAILED.value,      # Failed session
+        ),
+    ),
+
+    # RATE_LIMIT_EVENT - Rate Limit Tracking
+    NodeType.RATE_LIMIT_EVENT.value: TopologyConstraint(
+        node_type=NodeType.RATE_LIMIT_EVENT.value,
+        description="Immutable record of rate limit events. Append-only for tracking.",
+        edge_constraints=(),  # No required edges - standalone events
+        allowed_statuses=(
+            NodeStatus.VERIFIED.value,  # Events are immutable once created
         ),
     ),
 }
