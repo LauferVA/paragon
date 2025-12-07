@@ -348,18 +348,24 @@ class ParagonDB:
     # EDGE OPERATIONS
     # =========================================================================
 
-    def add_edge(self, edge: EdgeData) -> int:
+    def add_edge(self, edge: EdgeData, check_cycle: bool = True) -> int:
         """
         Add an edge between two nodes.
 
+        Graph-Native Invariant: The graph MUST remain a DAG.
+        This is enforced at write time, not as a query.
+
         Args:
             edge: EdgeData with source_id, target_id, and type
+            check_cycle: If True (default), prevent edges that would create cycles.
+                        Set to False only for batch operations that check afterwards.
 
         Returns:
             The rustworkx edge index
 
         Raises:
             NodeNotFoundError: If source or target node doesn't exist
+            GraphInvariantError: If adding this edge would create a cycle
         """
         source_id = edge.source_id
         target_id = edge.target_id
@@ -371,6 +377,29 @@ class ParagonDB:
 
         src_idx = self._node_map[source_id]
         tgt_idx = self._node_map[target_id]
+
+        # Wave 2 Refactor: Enforce DAG invariant at write time
+        # If there's a path from target to source, adding source→target creates cycle
+        if check_cycle and source_id != target_id:
+            # Check if target can reach source (would create cycle)
+            try:
+                # rx.has_path returns True if there's a path from first to second arg
+                if rx.has_path(self._graph, tgt_idx, src_idx):
+                    raise GraphInvariantError(
+                        f"Cannot add edge {source_id} -> {target_id}: "
+                        f"would create cycle (path exists from target to source)"
+                    )
+            except Exception as e:
+                if isinstance(e, GraphInvariantError):
+                    raise
+                # If has_path fails for other reasons, continue (edge case)
+                pass
+
+        # Self-loops are always cycles
+        if source_id == target_id:
+            raise GraphInvariantError(
+                f"Cannot add self-loop edge {source_id} -> {target_id}"
+            )
 
         # Add to graph
         edge_idx = self._graph.add_edge(src_idx, tgt_idx, edge)
