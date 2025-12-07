@@ -143,6 +143,7 @@ try:
     from agents.schemas import (
         ImplementationPlan, CodeGeneration, TestGeneration,
         DialectorOutput, AmbiguityMarker, ResearchArtifact, ResearchFinding,
+        AgentSignature, SignatureAction,
     )
     from agents.prompts import build_prompt, build_dialector_prompt, build_researcher_prompt
     LLM_AVAILABLE = True
@@ -1009,7 +1010,22 @@ Implement complete, working Python code for this specification."""
                         "content": f"Generated code for {component_name}: {code_result.filename}"
                     })
 
-                    # Layer 7B: Add with safety checks
+                    # Create attribution signature for learning system
+                    from datetime import datetime
+                    builder_signature = AgentSignature(
+                        agent_id="builder_agent",
+                        model_id=llm.model if hasattr(llm, 'model') else "unknown",
+                        phase=CyclePhase.BUILD,
+                        action=SignatureAction.CREATED,
+                        temperature=getattr(llm, 'temperature', 0.7),
+                        context_constraints={
+                            "spec_id": spec_id,
+                            "component": component_name,
+                        },
+                        timestamp=datetime.utcnow().isoformat(),
+                    )
+
+                    # Layer 7B: Add with safety checks and attribution
                     safe_result = add_node_safe(
                         node_type="CODE",
                         content=code_result.code,
@@ -1022,6 +1038,7 @@ Implement complete, working Python code for this specification."""
                         },
                         created_by="builder_agent",
                         check_alignment=True,
+                        signature=builder_signature,
                     )
 
                     if safe_result.success:
@@ -1303,20 +1320,19 @@ def passed_node(state: GraphState) -> Dict[str, Any]:
         except Exception as e:
             logger.debug(f"Teleology validation failed: {e}")
 
-    # Trigger documentation generation
-    if DOCUMENTER_AVAILABLE:
-        try:
-            from agents.tools import _db
-            if _db is not None:
-                doc_results = generate_all_docs(db=_db)
-                messages.append({
-                    "role": "tool",
-                    "content": f"Documentation generated: {doc_results}",
-                    "tool_name": "documenter",
-                    "tool_result": doc_results,
-                })
-        except Exception as e:
-            logger.debug(f"Documentation generation failed: {e}")
+    # Flush transaction: generate docs and commit
+    # This will generate README/wiki/changelog and create a git commit
+    try:
+        from agents.tools import flush_transaction
+        flush_transaction(agent_id="orchestrator-success")
+        messages.append({
+            "role": "tool",
+            "content": "Documentation generated and changes committed",
+            "tool_name": "flush_transaction",
+            "tool_result": {"committed": True},
+        })
+    except Exception as e:
+        logger.debug(f"Transaction flush failed: {e}")
 
     # Learning: Record successful outcome for adaptive model selection
     try:

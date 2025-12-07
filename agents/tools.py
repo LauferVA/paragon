@@ -49,6 +49,7 @@ _db: Optional[ParagonDB] = None
 _parser: Optional[CodeParser] = None
 _mutation_logger = None  # Lazy-initialized MutationLogger
 _git_sync = None  # Lazy-initialized GitSync
+_training_store = None  # Lazy-initialized TrainingStore for attribution
 _pending_transaction: List[tuple] = []  # Collect mutations for git commit
 
 
@@ -77,6 +78,55 @@ def _get_git_sync():
     return _git_sync
 
 
+def _get_training_store():
+    """Get or create the TrainingStore instance (lazy initialization)."""
+    global _training_store
+    if _training_store is None:
+        try:
+            from infrastructure.training_store import TrainingStore
+            _training_store = TrainingStore()
+        except ImportError:
+            pass  # TrainingStore not available
+    return _training_store
+
+
+def _record_attribution(
+    session_id: str,
+    signature,
+    node_id: str,
+    state_id: str,
+) -> bool:
+    """
+    Record agent attribution to training store for learning.
+
+    This enables the learning system to track which agent+model
+    produced which nodes, for failure attribution and model routing.
+
+    Args:
+        session_id: Session identifier
+        signature: AgentSignature object
+        node_id: ID of the created node
+        state_id: State version ID
+
+    Returns:
+        True if attribution was recorded, False otherwise
+    """
+    store = _get_training_store()
+    if store is None or signature is None:
+        return False
+
+    try:
+        store.record_attribution(
+            session_id=session_id,
+            signature=signature,
+            node_id=node_id,
+            state_id=state_id,
+        )
+        return True
+    except Exception:
+        return False  # Silently fail - attribution is optional
+
+
 def _record_transaction(node_id: str, node_type: str, edge_info: Optional[tuple] = None):
     """Record a mutation for the current transaction batch."""
     global _pending_transaction
@@ -87,13 +137,40 @@ def _record_transaction(node_id: str, node_type: str, edge_info: Optional[tuple]
 
 def flush_transaction(agent_id: str = "agent"):
     """
-    Flush pending mutations to GitSync for commit.
+    Flush pending mutations: generate docs, then commit.
 
-    Call this at transaction boundaries (e.g., after a batch of related changes).
+    Call this ONLY at successful TDD cycle completion (passed_node).
+    This generates documentation and creates a git commit.
     """
     global _pending_transaction
+
+    # Skip if no pending changes
+    if not _pending_transaction:
+        return
+
+    # Generate documentation BEFORE commit
+    try:
+        from agents.documenter import generate_all_docs
+        import subprocess
+
+        if _db:
+            logger.info("Generating documentation before commit...")
+            doc_results = generate_all_docs(db=_db)
+            logger.info(f"Documentation generated: {doc_results}")
+
+            # Stage generated docs
+            subprocess.run(
+                ['git', 'add', 'README.md', 'docs/wiki/', 'CHANGELOG.md'],
+                cwd='.',
+                check=False,
+                capture_output=True
+            )
+    except Exception as e:
+        logger.warning(f"Doc generation failed: {e}")
+
+    # Now commit the transaction
     git_sync = _get_git_sync()
-    if git_sync and _pending_transaction:
+    if git_sync:
         try:
             nodes_created = [t[1] for t in _pending_transaction if t[0] == "node"]
             edges_created = [(t[1], t[2], t[3]) for t in _pending_transaction if t[0] == "edge"]
@@ -1378,6 +1455,18 @@ def add_node_safe(
         # Log edge creation if IMPLEMENTS edge was added
         if node_type == NodeType.CODE.value and spec_id:
             _log_edge_created(spec_id, node.id, EdgeType.IMPLEMENTS.value)
+
+        # Record attribution to training store for learning system
+        if signature is not None:
+            # Extract state_id from the signature chain we created
+            state_id = node.data.get("_signature_chain", {}).get("state_id", "")
+            # Use created_by as session_id if not provided separately
+            _record_attribution(
+                session_id=created_by,
+                signature=signature,
+                node_id=node.id,
+                state_id=state_id,
+            )
 
         return SafeNodeResult(
             success=True,

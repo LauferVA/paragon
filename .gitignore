@@ -91,3 +91,4 @@ Thumbs.db
 *.key
 credentials.json
 secrets.yaml
+.temp/
