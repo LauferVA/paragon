@@ -1,5 +1,5 @@
 # =============================================================================
-# PARAGON DEPENDENCIES (v2.1.0)
+# PARAGON DEPENDENCIES (v2.2.0) - AUDITED 2025-12-07
 # =============================================================================
 # Core runtime dependencies for the Rust-accelerated graph platform.
 # Install with: pip install -r requirements.txt
@@ -11,11 +11,6 @@
 rustworkx>=0.17.0          # Rust graph library (replaces NetworkX)
 polars>=0.20.0             # Rust DataFrame library (replaces Pandas)
 msgspec>=0.18.0            # Fast msgpack/JSON serialization (replaces Pydantic)
-
-# -----------------------------------------------------------------------------
-# SCHEMA VALIDATION
-# -----------------------------------------------------------------------------
-pandera>=0.18.0            # DataFrame schema validation (works with Polars)
 
 # -----------------------------------------------------------------------------
 # CODE ANALYSIS
@@ -35,6 +30,12 @@ pygmtools>=0.4.0           # Graph matching algorithms (RRWM, etc.)
 sentence-transformers>=2.2.0  # Local embedding model (all-MiniLM-L6-v2, 384 dims)
 
 # -----------------------------------------------------------------------------
+# LLM INFRASTRUCTURE
+# -----------------------------------------------------------------------------
+litellm>=1.0.0             # Multi-provider LLM abstraction (OpenAI, Anthropic, Ollama)
+tenacity>=8.0.0            # Retry logic with exponential backoff
+
+# -----------------------------------------------------------------------------
 # ORCHESTRATION
 # -----------------------------------------------------------------------------
 langgraph>=0.2.0           # LangChain graph orchestration (stable API)
@@ -51,9 +52,27 @@ tavily-python>=0.3.0       # Industrial-grade web search for agents
 psutil>=5.9.0              # System resource monitoring (CPU, RAM)
 
 # -----------------------------------------------------------------------------
-# SERVER
+# SPEECH-TO-TEXT (Voice Input)
+# -----------------------------------------------------------------------------
+faster-whisper>=1.0.0      # Fast Whisper inference via CTranslate2 (4x speedup)
+numpy>=1.24.0              # Array processing for audio data
+
+# -----------------------------------------------------------------------------
+# DATA GENERATION (Forge Module)
+# -----------------------------------------------------------------------------
+faker>=20.0.0              # Realistic synthetic data generation for domain masking
+scipy>=1.11.0              # Statistical distributions and correlations
+
+# -----------------------------------------------------------------------------
+# WEB SERVER & API
 # -----------------------------------------------------------------------------
 granian>=0.5.0             # Rust-based ASGI server
+starlette>=0.28.0          # ASGI web framework for API routes
+
+# -----------------------------------------------------------------------------
+# CONFIGURATION
+# -----------------------------------------------------------------------------
+PyYAML>=6.0.0              # YAML parsing for agent configuration
 
 # -----------------------------------------------------------------------------
 # OBSERVABILITY

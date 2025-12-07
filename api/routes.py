@@ -1061,6 +1061,9 @@ async def get_orchestrator_state(request: Request) -> JSONResponse:
 # WebSocket connections for dialectic updates (session_id -> websocket)
 _dialectic_ws_connections: Dict[str, WebSocket] = {}
 
+# WebSocket connections for audio streaming (session_id -> websocket)
+_audio_ws_connections: Dict[str, WebSocket] = {}
+
 
 async def dialectic_websocket(websocket: WebSocket) -> None:
     """
@@ -1519,6 +1522,276 @@ async def edge_case_summary(request: Request) -> JSONResponse:
 
 
 # =============================================================================
+# SPEECH-TO-TEXT ENDPOINTS
+# =============================================================================
+
+async def transcribe_audio_file(request: Request) -> JSONResponse:
+    """
+    Transcribe an uploaded audio file.
+
+    Body:
+        Multipart form data with 'audio' file
+        Optional 'language' field (e.g., 'en', 'es')
+
+    Response:
+        {
+            "text": "Full transcription...",
+            "segments": [
+                {
+                    "text": "Segment text",
+                    "start": 0.0,
+                    "end": 2.5,
+                    "confidence": 0.95
+                }
+            ],
+            "language": "en",
+            "duration": 10.5,
+            "model": "faster-whisper-base"
+        }
+    """
+    try:
+        from infrastructure.speech_to_text import get_stt_service
+        import tempfile
+
+        stt = get_stt_service()
+        if not stt.available:
+            return error_response(
+                "Speech-to-text service not available. Install with: pip install faster-whisper",
+                status_code=503
+            )
+
+        # Parse multipart form data
+        form = await request.form()
+        audio_file = form.get("audio")
+        language = form.get("language")
+
+        if not audio_file:
+            return error_response("No audio file provided", status_code=400)
+
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(await audio_file.read())
+            tmp_path = Path(tmp.name)
+
+        try:
+            # Transcribe
+            result = stt.transcribe_file(tmp_path, language=language)
+
+            if not result:
+                return error_response("Transcription failed", status_code=500)
+
+            # Convert to dict for JSON response
+            return JSONResponse({
+                "text": result.text,
+                "segments": [
+                    {
+                        "text": seg.text,
+                        "start": seg.start,
+                        "end": seg.end,
+                        "confidence": seg.confidence,
+                        "is_final": seg.is_final,
+                        "language": seg.language,
+                    }
+                    for seg in result.segments
+                ],
+                "language": result.language,
+                "duration": result.duration,
+                "model": result.model,
+            })
+
+        finally:
+            # Clean up temp file
+            tmp_path.unlink(missing_ok=True)
+
+    except ImportError:
+        return error_response(
+            "Speech-to-text dependencies not installed. Install with: pip install faster-whisper numpy",
+            status_code=503
+        )
+    except Exception as e:
+        return error_response(f"Transcription error: {e}", status_code=500)
+
+
+async def audio_streaming_websocket(websocket: WebSocket) -> None:
+    """
+    WebSocket endpoint for real-time audio streaming and transcription.
+
+    Protocol:
+    1. Client connects with ?session_id=<id> (optional)
+    2. Client sends binary audio data (16-bit PCM, 16kHz recommended)
+    3. Server streams back transcript segments as JSON
+    4. Client sends {"type": "stop"} to end transcription
+
+    Message format (server -> client):
+        {
+            "type": "transcript",
+            "data": {
+                "text": "Segment text",
+                "start": 0.0,
+                "end": 2.5,
+                "confidence": 0.95,
+                "is_final": false,
+                "language": "en"
+            }
+        }
+
+    Audio format:
+    - Sample rate: 16000 Hz (recommended)
+    - Channels: 1 (mono)
+    - Sample width: 16-bit PCM
+    - Encoding: Linear PCM
+
+    Example client (JavaScript):
+        const ws = new WebSocket('ws://localhost:8000/ws/audio');
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const mediaRecorder = new MediaRecorder(stream);
+
+        mediaRecorder.ondataavailable = (event) => {
+            ws.send(event.data);
+        };
+
+        ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'transcript') {
+                console.log('Transcript:', msg.data.text);
+            }
+        };
+
+        mediaRecorder.start(1000);  // Send chunks every 1 second
+    """
+    session_id = websocket.query_params.get("session_id", "")
+    await websocket.accept()
+
+    if session_id:
+        _audio_ws_connections[session_id] = websocket
+
+    try:
+        from infrastructure.speech_to_text import get_stt_service
+
+        stt = get_stt_service()
+
+        if not stt.available:
+            await websocket.send_json({
+                "type": "error",
+                "message": "Speech-to-text service not available"
+            })
+            await websocket.close()
+            return
+
+        # Send ready message
+        await websocket.send_json({
+            "type": "ready",
+            "message": "Audio streaming ready",
+            "model": f"faster-whisper-{stt.model_size}"
+        })
+
+        # Create async generator for audio stream
+        async def audio_stream():
+            while True:
+                try:
+                    # Receive binary audio data or JSON commands
+                    message = await asyncio.wait_for(
+                        websocket.receive(),
+                        timeout=30.0
+                    )
+
+                    # Handle binary audio data
+                    if "bytes" in message:
+                        yield message["bytes"]
+
+                    # Handle JSON commands (e.g., stop)
+                    elif "text" in message:
+                        data = msgspec.json.decode(message["text"])
+                        if data.get("type") == "stop":
+                            break
+
+                except asyncio.TimeoutError:
+                    # Send ping to keep connection alive
+                    await websocket.send_json({"type": "ping"})
+                except WebSocketDisconnect:
+                    break
+
+        # Stream transcription
+        async for segment in stt.transcribe_streaming(audio_stream()):
+            try:
+                await websocket.send_json({
+                    "type": "transcript",
+                    "data": {
+                        "text": segment.text,
+                        "start": segment.start,
+                        "end": segment.end,
+                        "confidence": segment.confidence,
+                        "is_final": segment.is_final,
+                        "language": segment.language,
+                    }
+                })
+            except Exception as e:
+                logger.error(f"Failed to send transcript segment: {e}")
+                break
+
+        # Send completion message
+        await websocket.send_json({
+            "type": "complete",
+            "message": "Transcription complete"
+        })
+
+    except ImportError:
+        await websocket.send_json({
+            "type": "error",
+            "message": "Speech-to-text dependencies not installed"
+        })
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error(f"Audio streaming error: {e}")
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Transcription error: {e}"
+            })
+        except Exception:
+            pass
+    finally:
+        if session_id in _audio_ws_connections:
+            del _audio_ws_connections[session_id]
+
+
+async def stt_status(request: Request) -> JSONResponse:
+    """
+    Check speech-to-text service status.
+
+    Response:
+        {
+            "available": true,
+            "model": "faster-whisper-base",
+            "device": "cpu",
+            "vad_enabled": true,
+            "llm_correction_enabled": false
+        }
+    """
+    try:
+        from infrastructure.speech_to_text import get_stt_service
+
+        stt = get_stt_service()
+
+        return JSONResponse({
+            "available": stt.available,
+            "model": f"faster-whisper-{stt.model_size}" if stt.available else None,
+            "device": stt.device,
+            "vad_enabled": stt.enable_vad,
+            "llm_correction_enabled": stt.enable_llm_correction,
+        })
+
+    except ImportError:
+        return JSONResponse({
+            "available": False,
+            "error": "faster-whisper not installed"
+        })
+    except Exception as e:
+        return error_response(f"Status check failed: {e}", status_code=500)
+
+
+# =============================================================================
 # APP FACTORY
 # =============================================================================
 
@@ -1572,6 +1845,10 @@ def create_routes() -> List[Route]:
         Route("/api/edge-cases/flag", flag_edge_case, methods=["POST"]),
         Route("/api/edge-cases/{edge_case_id}", get_edge_case, methods=["GET"]),
         Route("/api/edge-cases/{edge_case_id}/resolve", resolve_edge_case, methods=["POST"]),
+
+        # Speech-to-text endpoints
+        Route("/api/stt/status", stt_status, methods=["GET"]),
+        Route("/api/stt/transcribe", transcribe_audio_file, methods=["POST"]),
     ]
 
 
@@ -1580,6 +1857,7 @@ def create_websocket_routes() -> List[WebSocketRoute]:
     return [
         WebSocketRoute("/api/viz/ws", viz_websocket),
         WebSocketRoute("/api/dialectic/ws", dialectic_websocket),
+        WebSocketRoute("/ws/audio", audio_streaming_websocket),
     ]
 
 
