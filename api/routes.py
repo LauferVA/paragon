@@ -931,6 +931,255 @@ async def get_orchestrator_state(request: Request) -> JSONResponse:
 
 
 # =============================================================================
+# DIALECTIC WEBSOCKET (Phase 3 - Real-time Updates)
+# =============================================================================
+
+# WebSocket connections for dialectic updates (session_id -> websocket)
+_dialectic_ws_connections: Dict[str, WebSocket] = {}
+
+
+async def dialectic_websocket(websocket: WebSocket) -> None:
+    """
+    WebSocket endpoint for real-time dialectic phase updates.
+
+    Protocol:
+    1. Client connects with ?session_id=<id>
+    2. Server sends current dialectic state (phase, questions, etc.)
+    3. Server streams updates as orchestrator progresses
+    4. Client can send answer submissions
+    """
+    session_id = websocket.query_params.get("session_id", "")
+    await websocket.accept()
+
+    if session_id:
+        _dialectic_ws_connections[session_id] = websocket
+
+    try:
+        # Send initial state
+        global _orchestrator_state
+        initial_state = {
+            "type": "state_update",
+            "data": {
+                "phase": _orchestrator_state.get("phase", "init"),
+                "session_id": session_id or _orchestrator_state.get("session_id", ""),
+                "has_questions": len(_orchestrator_state.get("clarification_questions", [])) > 0,
+                "questions": _format_questions_for_ws(_orchestrator_state.get("clarification_questions", [])),
+                "dialectic_passed": _orchestrator_state.get("dialectic_passed", False),
+            }
+        }
+        await websocket.send_json(initial_state)
+
+        # Listen for client messages
+        while True:
+            try:
+                data = await asyncio.wait_for(
+                    websocket.receive_json(),
+                    timeout=30.0
+                )
+
+                msg_type = data.get("type", "")
+
+                if msg_type == "submit_answer":
+                    # Process answer submission
+                    answers = data.get("data", {}).get("answers", [])
+                    answer_text = "\n".join([
+                        f"{i+1}. {ans.get('answer', '')}"
+                        for i, ans in enumerate(answers)
+                    ])
+
+                    _orchestrator_state["human_response"] = answer_text
+                    _orchestrator_state["pending_human_input"] = None
+
+                    # Try to resume orchestrator
+                    orchestrator = get_orchestrator()
+                    if orchestrator and session_id:
+                        try:
+                            result = orchestrator.resume(session_id, human_response=answer_text)
+                            _orchestrator_state.update(result)
+                        except Exception as e:
+                            _orchestrator_state["phase"] = "research"
+
+                    # Send updated state
+                    await websocket.send_json({
+                        "type": "state_update",
+                        "data": {
+                            "phase": _orchestrator_state.get("phase", "research"),
+                            "session_id": session_id,
+                            "has_questions": False,
+                            "dialectic_passed": True,
+                        }
+                    })
+
+                elif msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+
+            except asyncio.TimeoutError:
+                # Send heartbeat
+                await websocket.send_json({"type": "ping"})
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        if session_id in _dialectic_ws_connections:
+            del _dialectic_ws_connections[session_id]
+
+
+def _format_questions_for_ws(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Format clarification questions for WebSocket transmission."""
+    formatted = []
+    for i, q in enumerate(questions):
+        formatted.append({
+            "id": f"q_{i}",
+            "question": q.get("question", ""),
+            "category": q.get("category", "MISSING_CONTEXT"),
+            "text": q.get("text", ""),
+            "suggested_answer": q.get("suggested_answer"),
+        })
+    return formatted
+
+
+async def broadcast_dialectic_update(session_id: str, update: Dict[str, Any]) -> None:
+    """Broadcast dialectic state update to connected client."""
+    if session_id in _dialectic_ws_connections:
+        ws = _dialectic_ws_connections[session_id]
+        try:
+            await ws.send_json({
+                "type": "state_update",
+                "data": update
+            })
+        except Exception:
+            del _dialectic_ws_connections[session_id]
+
+
+# =============================================================================
+# ORCHESTRATOR SESSION MANAGEMENT
+# =============================================================================
+
+import uuid as _uuid
+
+
+async def start_orchestrator_session(request: Request) -> JSONResponse:
+    """
+    Start a new TDD orchestrator session.
+
+    Body:
+        {
+            "requirement_text": "Create a function that...",
+            "requirements": ["Must be fast", "Must handle errors"]  # optional
+        }
+
+    Response:
+        {
+            "session_id": "...",
+            "status": "started",
+            "phase": "dialectic"
+        }
+    """
+    try:
+        body = await request.json()
+    except Exception as e:
+        return error_response(f"Invalid JSON: {e}")
+
+    requirement_text = body.get("requirement_text", "")
+    requirements = body.get("requirements", [])
+
+    if not requirement_text:
+        return error_response("requirement_text is required", status_code=400)
+
+    # Generate session ID
+    session_id = f"session_{_uuid.uuid4().hex[:12]}"
+    task_id = f"task_{_uuid.uuid4().hex[:8]}"
+
+    # Update global state for polling endpoints
+    global _orchestrator_state
+    _orchestrator_state = {
+        "session_id": session_id,
+        "task_id": task_id,
+        "phase": "dialectic",
+        "spec": requirement_text,
+        "requirements": requirements,
+        "clarification_questions": [],
+        "dialectic_passed": False,
+        "pending_human_input": None,
+    }
+
+    # Get orchestrator and start in background (non-blocking)
+    orchestrator = get_orchestrator()
+    if orchestrator:
+        # For now, return immediately and let client poll or use WebSocket
+        # Full async background execution would require more infrastructure
+        _orchestrator_state["orchestrator_available"] = True
+    else:
+        _orchestrator_state["orchestrator_available"] = False
+
+    return JSONResponse({
+        "session_id": session_id,
+        "task_id": task_id,
+        "status": "started",
+        "phase": "dialectic",
+        "orchestrator_available": _orchestrator_state.get("orchestrator_available", False),
+    }, status_code=201)
+
+
+async def run_orchestrator_phase(request: Request) -> JSONResponse:
+    """
+    Run the next phase of an orchestrator session.
+
+    Body:
+        {
+            "session_id": "...",
+            "phase": "dialectic"  # optional - run specific phase
+        }
+
+    This allows step-by-step execution for debugging/testing.
+    """
+    try:
+        body = await request.json()
+    except Exception as e:
+        return error_response(f"Invalid JSON: {e}")
+
+    session_id = body.get("session_id")
+    requested_phase = body.get("phase")
+
+    if not session_id:
+        return error_response("session_id is required", status_code=400)
+
+    global _orchestrator_state
+    if _orchestrator_state.get("session_id") != session_id:
+        return error_response(f"Session {session_id} not found", status_code=404)
+
+    orchestrator = get_orchestrator()
+    if not orchestrator:
+        return error_response("Orchestrator not available", status_code=503)
+
+    try:
+        # Run orchestrator with current state
+        result = orchestrator.run(
+            session_id=session_id,
+            task_id=_orchestrator_state.get("task_id", ""),
+            spec=_orchestrator_state.get("spec", ""),
+            requirements=_orchestrator_state.get("requirements", []),
+            max_iterations=3,
+            fresh=False,  # Resume existing session
+        )
+
+        # Update global state
+        _orchestrator_state.update(result)
+
+        return JSONResponse({
+            "session_id": session_id,
+            "phase": result.get("phase", "unknown"),
+            "has_questions": len(result.get("clarification_questions", [])) > 0,
+            "questions": _format_questions_for_ws(result.get("clarification_questions", [])),
+            "dialectic_passed": result.get("dialectic_passed", False),
+            "final_status": result.get("final_status"),
+        })
+
+    except Exception as e:
+        return error_response(f"Orchestrator error: {e}", status_code=500)
+
+
+# =============================================================================
 # APP FACTORY
 # =============================================================================
 
@@ -972,6 +1221,10 @@ def create_routes() -> List[Route]:
         Route("/api/dialector/questions", get_dialector_questions, methods=["GET"]),
         Route("/api/dialector/answer", submit_dialector_answer, methods=["POST"]),
         Route("/api/orchestrator/state", get_orchestrator_state, methods=["GET"]),
+
+        # Orchestrator session management
+        Route("/api/orchestrator/sessions", start_orchestrator_session, methods=["POST"]),
+        Route("/api/orchestrator/run", run_orchestrator_phase, methods=["POST"]),
     ]
 
 
@@ -979,6 +1232,7 @@ def create_websocket_routes() -> List[WebSocketRoute]:
     """Create WebSocket routes."""
     return [
         WebSocketRoute("/api/viz/ws", viz_websocket),
+        WebSocketRoute("/api/dialectic/ws", dialectic_websocket),
     ]
 
 

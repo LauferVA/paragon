@@ -50,6 +50,8 @@ _parser: Optional[CodeParser] = None
 _mutation_logger = None  # Lazy-initialized MutationLogger
 _git_sync = None  # Lazy-initialized GitSync
 _training_store = None  # Lazy-initialized TrainingStore for attribution
+_metrics_collector = None  # Lazy-initialized MetricsCollector
+_rerun_logger = None  # Lazy-initialized RerunLogger for visualization
 _pending_transaction: List[tuple] = []  # Collect mutations for git commit
 
 
@@ -88,6 +90,30 @@ def _get_training_store():
         except ImportError:
             pass  # TrainingStore not available
     return _training_store
+
+
+def _get_metrics_collector():
+    """Get or create the MetricsCollector instance (lazy initialization)."""
+    global _metrics_collector
+    if _metrics_collector is None:
+        try:
+            from infrastructure.metrics import MetricsCollector
+            _metrics_collector = MetricsCollector()
+        except ImportError:
+            pass  # MetricsCollector not available
+    return _metrics_collector
+
+
+def _get_rerun_logger():
+    """Get or create the RerunLogger instance (lazy initialization)."""
+    global _rerun_logger
+    if _rerun_logger is None:
+        try:
+            from infrastructure.rerun_logger import RerunLogger
+            _rerun_logger = RerunLogger()
+        except ImportError:
+            pass  # RerunLogger not available
+    return _rerun_logger
 
 
 def _record_attribution(
@@ -185,7 +211,7 @@ def flush_transaction(agent_id: str = "agent"):
             _pending_transaction = []
 
 
-def _log_node_created(node_id: str, node_type: str, created_by: str):
+def _log_node_created(node_id: str, node_type: str, created_by: str, content: str = ""):
     """Log a node creation event and record for transaction."""
     # Log to MutationLogger
     logger = _get_mutation_logger()
@@ -198,6 +224,30 @@ def _log_node_created(node_id: str, node_type: str, created_by: str):
             )
         except Exception:
             pass  # Don't fail on logging errors
+
+    # Log to MetricsCollector (NEW: wiring infrastructure)
+    metrics = _get_metrics_collector()
+    if metrics:
+        try:
+            metrics.record_node_created(
+                node_id=node_id,
+                node_type=node_type,
+                created_by=created_by,
+            )
+        except Exception:
+            pass  # Don't fail on metrics errors
+
+    # Log to RerunLogger for visualization (NEW: wiring infrastructure)
+    rerun = _get_rerun_logger()
+    if rerun:
+        try:
+            rerun.log_node(
+                node_id=node_id,
+                node_type=node_type,
+                content=content[:200] if content else "",  # Truncate for viz
+            )
+        except Exception:
+            pass  # Don't fail on visualization errors
 
     # Record for GitSync transaction
     _record_transaction(node_id, node_type)
@@ -216,6 +266,18 @@ def _log_edge_created(source_id: str, target_id: str, edge_type: str):
             )
         except Exception:
             pass
+
+    # Log to RerunLogger for visualization (NEW: wiring infrastructure)
+    rerun = _get_rerun_logger()
+    if rerun:
+        try:
+            rerun.log_edge(
+                source_id=source_id,
+                target_id=target_id,
+                edge_type=edge_type,
+            )
+        except Exception:
+            pass  # Don't fail on visualization errors
 
     # Record for GitSync transaction
     global _pending_transaction
@@ -398,6 +460,10 @@ def add_node(
             created_by=created_by,
         )
         db.add_node(node)
+
+        # Log the node creation (NEW: consistent logging for all add_node calls)
+        _log_node_created(node.id, node_type, created_by, content)
+
         return NodeResult(
             success=True,
             node_id=node.id,
@@ -491,6 +557,10 @@ def add_edge(
             metadata=metadata or {},
         )
         db.add_edge(edge)
+
+        # Log the edge creation (NEW: consistent logging for all add_edge calls)
+        _log_edge_created(source_id, target_id, edge_type)
+
         return EdgeResult(
             success=True,
             count=1,

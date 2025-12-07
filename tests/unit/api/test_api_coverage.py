@@ -1570,8 +1570,10 @@ def test_create_websocket_routes():
 
     ws_routes = create_websocket_routes()
 
-    assert len(ws_routes) == 1
-    assert ws_routes[0].path == "/api/viz/ws"
+    assert len(ws_routes) == 2  # viz and dialectic WebSocket endpoints
+    paths = [r.path for r in ws_routes]
+    assert "/api/viz/ws" in paths
+    assert "/api/dialectic/ws" in paths
 
 
 def test_create_app_combines_routes():
