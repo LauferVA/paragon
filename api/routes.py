@@ -253,6 +253,130 @@ async def get_node(request: Request) -> Response:
     return json_response(node)
 
 
+async def get_node_dialogue(request: Request) -> JSONResponse:
+    """
+    Get all dialogue turns linked to a node.
+
+    This traverses the graph to find CLARIFICATION nodes connected
+    to this node or its ancestors, returning Q&A pairs as dialogue turns.
+
+    Returns:
+        {
+            "node_id": "...",
+            "dialogue": [
+                {
+                    "turn_number": 0,
+                    "agent": "system",
+                    "type": "question",
+                    "content": "What does 'fast' mean?",
+                    "timestamp": "...",
+                    "metadata": {...}
+                },
+                {
+                    "turn_number": 0,
+                    "agent": "user",
+                    "type": "answer",
+                    "content": "< 100ms latency",
+                    "timestamp": "...",
+                    "metadata": {...}
+                }
+            ],
+            "count": 2
+        }
+    """
+    node_id = request.path_params["node_id"]
+    db = get_db()
+
+    node = db.get_node(node_id)
+    if node is None:
+        return error_response(f"Node not found: {node_id}", status_code=404)
+
+    try:
+        # Strategy: Find CLARIFICATION nodes in ancestors
+        # 1. Get ancestors of this node
+        ancestors = db.get_ancestors(node_id)
+        ancestor_ids = {a.id for a in ancestors}
+        ancestor_ids.add(node_id)  # Include self
+
+        # 2. Find all CLARIFICATION nodes
+        all_nodes = db.get_all_nodes()
+        clarification_nodes = [n for n in all_nodes if n.type == "CLARIFICATION"]
+
+        # 3. Find CLARIFICATION nodes that TRACE_TO any of our ancestors
+        edges = db.get_all_edges()
+        relevant_clarifications = []
+
+        for clarif_node in clarification_nodes:
+            # Check if this CLARIFICATION traces to any of our ancestors
+            for edge in edges:
+                if (edge.type == "TRACES_TO" and
+                    edge.source_id == clarif_node.id and
+                    edge.target_id in ancestor_ids):
+                    relevant_clarifications.append(clarif_node)
+                    break
+
+        # 4. Build dialogue turns from CLARIFICATION nodes
+        # Group by question-answer pairs using RESOLVED_BY edges
+        dialogue_turns = []
+        processed = set()
+
+        for node in relevant_clarifications:
+            if node.id in processed:
+                continue
+
+            role = node.data.get("role", "unknown")
+
+            if role == "question":
+                # This is a question - find its answer
+                question_turn = {
+                    "turn_number": node.data.get("turn_number", 0),
+                    "agent": "system",
+                    "type": "question",
+                    "content": node.content,
+                    "timestamp": node.data.get("timestamp", node.created_at),
+                    "metadata": {
+                        "node_id": node.id,
+                        "category": node.data.get("category", ""),
+                        "session_id": node.data.get("session_id", ""),
+                    }
+                }
+                dialogue_turns.append(question_turn)
+                processed.add(node.id)
+
+                # Find answer via RESOLVED_BY edge
+                for edge in edges:
+                    if edge.type == "RESOLVED_BY" and edge.target_id == node.id:
+                        answer_node = db.get_node(edge.source_id)
+                        if answer_node:
+                            answer_turn = {
+                                "turn_number": answer_node.data.get("turn_number", 0),
+                                "agent": "user",
+                                "type": "answer",
+                                "content": answer_node.content,
+                                "timestamp": answer_node.data.get("timestamp", answer_node.created_at),
+                                "metadata": {
+                                    "node_id": answer_node.id,
+                                    "category": answer_node.data.get("category", ""),
+                                    "session_id": answer_node.data.get("session_id", ""),
+                                }
+                            }
+                            dialogue_turns.append(answer_turn)
+                            processed.add(answer_node.id)
+                        break
+
+        # Sort by turn_number and timestamp
+        dialogue_turns.sort(key=lambda t: (t["turn_number"], t["timestamp"]))
+
+        return JSONResponse({
+            "node_id": node_id,
+            "dialogue": dialogue_turns,
+            "count": len(dialogue_turns),
+        })
+
+    except Exception as e:
+        return error_response(f"Failed to retrieve dialogue: {e}", status_code=500)
+
+
 async def list_nodes(request: Request) -> Response:
     """
     List nodes with optional filters.
@@ -1409,6 +1533,7 @@ def create_routes() -> List[Route]:
         Route("/nodes", create_node, methods=["POST"]),
         Route("/nodes", list_nodes, methods=["GET"]),
         Route("/nodes/{node_id}", get_node, methods=["GET"]),
+        Route("/nodes/{node_id}/dialogue", get_node_dialogue, methods=["GET"]),
 
         # Edge operations
         Route("/edges", create_edge, methods=["POST"]),

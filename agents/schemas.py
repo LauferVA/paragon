@@ -17,6 +17,27 @@ from enum import Enum
 
 
 # =============================================================================
+# SPEC PARSING
+# =============================================================================
+
+class ParsedSpec(msgspec.Struct, kw_only=True):
+    """
+    Structured output from spec parsing.
+
+    Contains extracted information from a spec file.
+    """
+    title: str
+    description: str
+    requirements: List[str] = []
+    technical_details: Optional[str] = None
+    target_user: Optional[str] = None
+    must_have_features: List[str] = []
+    constraints: List[str] = []
+    raw_content: str = ""
+    file_format: str = ""
+
+
+# =============================================================================
 # COMPONENT SPECIFICATIONS
 # =============================================================================
 

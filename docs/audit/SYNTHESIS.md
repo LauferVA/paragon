@@ -84,13 +84,11 @@ agents/human_loop.py
 agents/research.py
 infrastructure/training_store.py
 benchmarks/harness.py
-benchmarks/protocol_alpha.py
-benchmarks/protocol_beta.py
-benchmarks/protocol_delta.py
-benchmarks/protocol_epsilon.py
-benchmarks/protocol_gamma.py
-benchmarks/protocol_zeta.py
-benchmarks/run_all.py
+benchmarks/protocol_alpha.py  (Speed Tests)
+benchmarks/protocol_beta.py   (Integrity Tests)
+tests/integration/test_orchestrator.py  (Orchestration Tests - moved from protocol_gamma)
+tests/unit/agents/test_tools_llm.py    (Brain/LLM Tests - moved from protocol_delta)
+tests/unit/core/test_graph_invariants.py  (Physics Tests - moved from protocol_epsilon)
 api/routes.py
 domain/code_parser.py
 main.py

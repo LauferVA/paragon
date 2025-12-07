@@ -5,13 +5,11 @@
 | File | Purpose | Status | Fitness | Recommendation |
 |------|---------|--------|---------|----------------|
 | **harness.py** | Master test harness for all benchmarks | FULLY_WIRED | HIGH | KEEP |
-| **protocol_alpha.py** | Speed verification (<50ms rustworkx ops) | FULLY_WIRED | HIGH | KEEP |
-| **protocol_beta.py** | Integrity verification (self-ingestion) | FULLY_WIRED | HIGH | KEEP |
-| **protocol_delta.py** | Layer 7 verification (LLM + auditing) | FULLY_WIRED | HIGH | KEEP |
-| **protocol_epsilon.py** | Layer 8 verification (physics invariants) | FULLY_WIRED | HIGH | KEEP |
-| **protocol_gamma.py** | Orchestration layer tests | FULLY_WIRED | HIGH | KEEP |
-| **protocol_zeta.py** | Human-in-the-loop verification | FULLY_WIRED | HIGH | KEEP |
-| **run_all.py** | Grand unified test runner | FULLY_WIRED | HIGH | KEEP |
+| **protocol_alpha.py** | Speed Tests (<50ms rustworkx ops) | FULLY_WIRED | HIGH | KEEP |
+| **protocol_beta.py** | Integrity Tests (self-ingestion) | FULLY_WIRED | HIGH | KEEP |
+| **test_orchestrator.py** | Orchestration Tests (moved from protocol_gamma) | FULLY_WIRED | HIGH | KEEP |
+| **test_tools_llm.py** | Brain/LLM Tests (moved from protocol_delta) | FULLY_WIRED | HIGH | KEEP |
+| **test_graph_invariants.py** | Physics Tests (moved from protocol_epsilon) | FULLY_WIRED | HIGH | KEEP |
 | **api/routes.py** | RESTful API (Starlette/ASGI) | FULLY_WIRED | HIGH | KEEP |
 | **viz/core.py** | Visualization structures & Arrow serialization | PARTIALLY_WIRED | HIGH | KEEP |
 

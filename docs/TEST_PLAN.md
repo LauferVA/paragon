@@ -11,7 +11,7 @@ After thorough investigation of the Paragon codebase, I've identified significan
 ### Existing Tests
 **Location**: `/Users/lauferva/paragon/benchmarks/`
 
-1. **Protocol Alpha** (protocol_alpha.py) - Speed/Performance
+1. **Speed Tests** (benchmarks/protocol_alpha.py)
    - Wave computation (rustworkx layers)
    - Batch node insertion
    - Descendant queries
@@ -19,7 +19,7 @@ After thorough investigation of the Paragon codebase, I've identified significan
    - Cycle detection
    - Status: PASSING (benchmarks only, not assertions)
 
-2. **Protocol Beta** (protocol_beta.py) - Integrity
+2. **Integrity Tests** (benchmarks/protocol_beta.py)
    - Self-ingestion (code parsing)
    - Import tracking
    - Index map consistency
@@ -28,14 +28,14 @@ After thorough investigation of the Paragon codebase, I've identified significan
    - Wave correctness
    - Status: PASSING (integration-level)
 
-3. **Protocol Gamma** (protocol_gamma.py) - Orchestration
+3. **Orchestration Tests** (tests/integration/test_orchestrator.py)
    - Tool functions (add_node, batch ops, queries)
    - StateGraph creation
    - Human loop controller
    - Integration tests
    - Status: PASSING (mocked LLM)
 
-4. **Protocol Delta** (protocol_delta.py) - Layer 7 (Brain)
+4. **Brain/LLM Tests** (tests/unit/agents/test_tools_llm.py)
    - Syntax checking (tree-sitter)
    - add_node_safe hooks
    - Alignment verification
@@ -43,7 +43,7 @@ After thorough investigation of the Paragon codebase, I've identified significan
    - Prompt builders
    - Status: PASSING (unittest-based)
 
-5. **Protocol Epsilon** (protocol_epsilon.py) - Layer 8 (Physics)
+5. **Physics/Invariant Tests** (tests/unit/core/test_graph_invariants.py)
    - Graph invariants (Handshaking, Balis, DAG)
    - Teleology validation
    - Merkle hashing
@@ -99,7 +99,7 @@ Critical test cases:
 - test_schema_prompt_injection_resistance
 ```
 
-**ontology.py** - PARTIALLY COVERED (Protocol Epsilon)
+**ontology.py** - PARTIALLY COVERED (Physics/Invariant Tests)
 ```
 Additional test cases needed:
 - test_topology_constraint_validation_all_types
@@ -109,7 +109,7 @@ Additional test cases needed:
 - test_validate_status_for_type_transitions
 ```
 
-**schemas.py** - PARTIALLY COVERED (Protocol Beta)
+**schemas.py** - PARTIALLY COVERED (Integrity Tests)
 ```
 Additional test cases needed:
 - test_nodedata_validation_required_fields
@@ -119,9 +119,9 @@ Additional test cases needed:
 - test_serialization_performance_benchmark
 ```
 
-**teleology.py** - COVERED (Protocol Epsilon) ✓
+**teleology.py** - COVERED (Physics/Invariant Tests) ✓
 
-**graph_invariants.py** - COVERED (Protocol Epsilon) ✓
+**graph_invariants.py** - COVERED (Physics/Invariant Tests) ✓
 
 **alignment.py** - MISSING ALL TESTS
 ```
@@ -159,7 +159,7 @@ Critical test cases:
 
 #### Agents Layer (`/Users/lauferva/paragon/agents/`)
 
-**tools.py** - PARTIALLY COVERED (Protocol Gamma)
+**tools.py** - PARTIALLY COVERED (Orchestration Tests)
 ```
 Additional test cases needed:
 - test_parse_source_invalid_syntax_handling
@@ -170,7 +170,7 @@ Additional test cases needed:
 - test_safe_node_result_violation_reporting
 ```
 
-**orchestrator.py** - PARTIALLY COVERED (Protocol Gamma)
+**orchestrator.py** - PARTIALLY COVERED (Orchestration Tests)
 ```
 Additional test cases needed:
 - test_tdd_cycle_full_success_path
@@ -185,7 +185,7 @@ Additional test cases needed:
 - test_graceful_degradation_llm_unavailable
 ```
 
-**human_loop.py** - PARTIALLY COVERED (Protocol Gamma)
+**human_loop.py** - PARTIALLY COVERED (Orchestration Tests)
 ```
 Additional test cases needed:
 - test_create_request_timeout_expiration
@@ -196,7 +196,7 @@ Additional test cases needed:
 - test_pause_point_registry_custom_points
 ```
 
-**schemas.py** - PARTIALLY COVERED (Protocol Delta)
+**schemas.py** - PARTIALLY COVERED (Brain/LLM Tests)
 ```
 Additional test cases needed:
 - test_implementation_plan_dependency_cycle_detection
@@ -206,7 +206,7 @@ Additional test cases needed:
 - test_research_artifact_confidence_calculation
 ```
 
-**prompts.py** - PARTIALLY COVERED (Protocol Delta)
+**prompts.py** - PARTIALLY COVERED (Brain/LLM Tests)
 ```
 Additional test cases needed:
 - test_build_architect_prompt_context_injection
@@ -302,7 +302,7 @@ Critical test cases:
 
 #### Domain Layer (`/Users/lauferva/paragon/domain/`)
 
-**code_parser.py** - PARTIALLY COVERED (Protocol Beta self-ingestion)
+**code_parser.py** - PARTIALLY COVERED (Integrity Tests self-ingestion)
 ```
 Additional test cases needed:
 - test_parse_classes_extraction

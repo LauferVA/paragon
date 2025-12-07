@@ -1,5 +1,5 @@
 """
-PROTOCOL GAMMA - Orchestration Layer Tests
+Orchestration Layer Tests (formerly Protocol Gamma)
 
 Tests the LangGraph orchestration and human-in-the-loop components.
 
@@ -9,7 +9,7 @@ Test Categories:
 3. Human Loop - Request/response lifecycle
 4. Integration - Full workflow
 
-Run: python -m benchmarks.protocol_gamma
+Run: pytest tests/integration/test_orchestrator.py -v
 """
 import sys
 from pathlib import Path
@@ -41,7 +41,7 @@ def run_tests() -> Tuple[int, int, List[str]]:
             failures.append(f"{name}: {e}")
 
     print("\n" + "=" * 60)
-    print("PROTOCOL GAMMA - Orchestration Layer Tests")
+    print("ORCHESTRATION LAYER TESTS")
     print("=" * 60)
 
     # =========================================================================
@@ -227,7 +227,7 @@ def run_tests() -> Tuple[int, int, List[str]]:
         set_db(ParagonDB())
         reset_llm()
 
-        # Protocol Gamma tests ORCHESTRATION LOGIC, not LLM API latency.
+        # Orchestration tests validate ORCHESTRATION LOGIC, not LLM API latency.
         # LLM calls work (verified), but take 5-20s each, making 3 tests = 3+ min
         # Mocking ensures fast CI while RateLimitGuard protects production.
         original_llm = orch.LLM_AVAILABLE
@@ -513,7 +513,7 @@ def run_tests() -> Tuple[int, int, List[str]]:
     # SUMMARY
     # =========================================================================
     print("\n" + "=" * 60)
-    print(f"PROTOCOL GAMMA RESULTS: {passed} passed, {failed} failed")
+    print(f"ORCHESTRATION TESTS: {passed} passed, {failed} failed")
     print("=" * 60)
 
     if failures:

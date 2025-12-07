@@ -1,0 +1,25 @@
+{
+  "title": "Fibonacci Calculator API",
+  "description": "A simple web API that calculates Fibonacci numbers efficiently. The service should handle large numbers and provide both iterative and recursive implementations.",
+  "target_user": "Developers who need a reliable Fibonacci calculation service for testing, education, or integration into larger applications.",
+  "requirements": [
+    "Endpoint /fib/{n} returns the nth Fibonacci number",
+    "Endpoint /fib/batch accepts array of numbers and returns all results",
+    "Support query parameter ?method=iterative|recursive",
+    "Include request timing in response",
+    "Handle errors gracefully (negative numbers, overflow, etc.)"
+  ],
+  "must_have_features": [
+    "Calculate Fibonacci numbers up to n=1000",
+    "Support both GET and POST requests",
+    "Return results in JSON format",
+    "Include timing information for performance analysis",
+    "Provide both iterative and recursive calculation methods"
+  ],
+  "technical_details": "Stack: Python, FastAPI\nDatabase: None required (stateless service)\nPerformance: Response time < 100ms for n <= 100",
+  "constraints": [
+    "Response time < 100ms for n <= 100",
+    "Must handle negative numbers gracefully",
+    "Must prevent integer overflow"
+  ]
+}

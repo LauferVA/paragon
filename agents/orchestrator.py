@@ -563,11 +563,13 @@ def clarification_node(state: GraphState) -> Dict[str, Any]:
     - Waits for responses
     - Records outcomes for learning
     - Incorporates feedback into the spec
+    - PERSISTS Q&A to graph as CLARIFICATION nodes
     """
     questions = state.get("clarification_questions", [])
     human_response = state.get("human_response", None)
     spec = state.get("spec", "")
     session_id = state.get("session_id", "unknown")
+    task_id = state.get("task_id", "unknown")
 
     messages = []
 
@@ -614,11 +616,89 @@ def clarification_node(state: GraphState) -> Dict[str, Any]:
         logger.debug(f"AdaptiveQuestioner failed: {e}")
 
     if human_response:
-        # User has provided responses - incorporate them
+        # User has provided responses - incorporate them and PERSIST TO GRAPH
         messages.append({
             "role": "user",
             "content": f"User clarification: {human_response}"
         })
+
+        # PERSIST: Create CLARIFICATION nodes for each Q&A pair
+        from datetime import datetime
+        try:
+            # Find the REQ node to link to
+            req_result = query_nodes(node_type="REQ", limit=100)
+            req_node_id = None
+            if req_result.success and req_result.node_ids:
+                # Use the first REQ node (or find by task_id if needed)
+                req_node_id = req_result.node_ids[0]
+
+            # Parse the human response into individual answers
+            # Assuming format: "1. answer1\n2. answer2\n..."
+            answer_lines = [line.strip() for line in human_response.split('\n') if line.strip()]
+
+            for i, q in enumerate(prioritized_questions):
+                question_text = q.get("question", q.get("phrase", ""))
+                category = q.get("category", "MISSING_CONTEXT")
+
+                # Create CLARIFICATION node for the question
+                question_node_result = add_node(
+                    node_type="CLARIFICATION",
+                    content=question_text,
+                    data={
+                        "role": "question",
+                        "category": category,
+                        "turn_number": i,
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "session_id": session_id,
+                    },
+                    created_by="dialector_agent",
+                )
+
+                if question_node_result.success:
+                    question_node_id = question_node_result.node_id
+
+                    # Link question to REQ if we have one
+                    if req_node_id:
+                        add_edge(
+                            source_id=question_node_id,
+                            target_id=req_node_id,
+                            edge_type="TRACES_TO",
+                        )
+
+                    # Create CLARIFICATION node for the answer if we have one
+                    if i < len(answer_lines):
+                        # Extract answer (remove leading number if present)
+                        answer_text = answer_lines[i]
+                        # Remove leading "1. " style prefix
+                        import re
+                        answer_text = re.sub(r'^\d+\.\s*', '', answer_text)
+
+                        answer_node_result = add_node(
+                            node_type="CLARIFICATION",
+                            content=answer_text,
+                            data={
+                                "role": "answer",
+                                "category": category,
+                                "turn_number": i,
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "session_id": session_id,
+                            },
+                            created_by="user",
+                        )
+
+                        if answer_node_result.success:
+                            answer_node_id = answer_node_result.node_id
+
+                            # Create RESOLVED_BY edge from answer to question
+                            add_edge(
+                                source_id=answer_node_id,
+                                target_id=question_node_id,
+                                edge_type="RESOLVED_BY",
+                            )
+
+                            logger.debug(f"Persisted Q&A pair: {question_node_id} -> {answer_node_id}")
+        except Exception as e:
+            logger.warning(f"Failed to persist clarification to graph: {e}")
 
         # Record question outcomes for learning (if adaptive questioner available)
         if adaptive_questioner:
@@ -1699,6 +1779,7 @@ class TDDOrchestrator:
         requirements: Optional[List[str]] = None,
         max_iterations: int = 3,
         fresh: bool = True,
+        initial_phase: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run a TDD cycle to completion.
@@ -1712,6 +1793,9 @@ class TDDOrchestrator:
             max_iterations: Maximum fix attempts
             fresh: If True, ensure this is a fresh run (not resuming previous state).
                   Set to False if intentionally resuming a session.
+            initial_phase: Optional initial phase to start in (e.g., "research", "plan").
+                          If not provided, starts at "init" which transitions to "dialectic".
+                          Use this when loading a spec file to skip dialectic if appropriate.
 
         Returns:
             Final state dictionary
@@ -1784,13 +1868,28 @@ class TDDOrchestrator:
             except Exception as e:
                 logger.debug(f"Environment detection failed: {e}")
 
+        # Determine starting phase
+        # If initial_phase is provided and valid, skip init and go directly there
+        starting_phase = CyclePhase.INIT.value
+        skip_init = False
+
+        if initial_phase:
+            try:
+                # Validate it's a valid phase
+                CyclePhase(initial_phase)
+                starting_phase = initial_phase
+                skip_init = True
+                logger.info(f"Starting directly at phase: {initial_phase}")
+            except ValueError:
+                logger.warning(f"Invalid initial_phase '{initial_phase}', starting at INIT")
+
         initial_state: GraphState = {
             "session_id": effective_session_id,
             "task_id": task_id,
             "spec": spec,
             "requirements": requirements or [],
             "max_iterations": max_iterations,
-            "phase": CyclePhase.INIT.value,
+            "phase": starting_phase,
             "messages": [],
             "artifacts": [],
             "code_node_ids": [],
@@ -1802,6 +1901,12 @@ class TDDOrchestrator:
             "pending_human_input": None,
             "human_response": None,
             "final_status": None,
+            # Pre-populate dialectic state if skipping init
+            "ambiguities": [],
+            "clarification_questions": [],
+            "research_findings": [],
+            "dialectic_passed": skip_init,  # Mark as passed if we're skipping init/dialectic
+            "research_complete": False,
         }
 
         config = {"configurable": {"thread_id": effective_session_id}}
