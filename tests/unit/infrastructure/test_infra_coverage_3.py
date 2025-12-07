@@ -274,13 +274,14 @@ class TestRerunIntegration:
         assert integration._rr is None
         assert integration._initialized is False
 
-    @patch('infrastructure.logger.rr', None)
     def test_initialize_without_rerun_sdk(self, capsys):
         """Test initialization without Rerun SDK installed."""
         integration = RerunIntegration()
-        result = integration.initialize()
-        assert result is False
-        assert integration._initialized is False
+        # Mock ImportError for rerun
+        with patch('builtins.__import__', side_effect=ImportError):
+            result = integration.initialize()
+            assert result is False
+            assert integration._initialized is False
 
     def test_log_event_not_initialized(self):
         """Test log_event when not initialized."""
@@ -567,7 +568,11 @@ class TestUtilityFunctions:
     def test_detect_environment(self):
         """Test environment detection."""
         env = detect_environment()
-        assert env in ["development", "testing", "production"]
+        # detect_environment returns an EnvironmentReport, not a string
+        from infrastructure.environment import EnvironmentReport
+        assert isinstance(env, EnvironmentReport)
+        assert hasattr(env, 'os_name')
+        assert hasattr(env, 'python_version')
 
 
 # =============================================================================
@@ -619,9 +624,19 @@ class TestLoggerConvenience:
     def test_log_audit(self, temp_dir):
         """Test log_audit convenience function."""
         audit_path = temp_dir / "audit.log"
-        get_audit_logger(audit_path)
-        log_audit("test_action", node_id="node_1", agent_id="agent_1")
-        assert audit_path.exists()
+        # Reset the global audit logger to use our temp path
+        from infrastructure.logger import _global_audit_logger
+        import infrastructure.logger as logger_module
+        old_logger = logger_module._global_audit_logger
+        logger_module._global_audit_logger = None
+
+        try:
+            get_audit_logger(audit_path)
+            log_audit("test_action", node_id="node_1", agent_id="agent_1")
+            assert audit_path.exists()
+        finally:
+            # Restore
+            logger_module._global_audit_logger = old_logger
 
 
 # =============================================================================
@@ -938,16 +953,23 @@ class TestDataLoader:
 
     def test_load_graph_from_csv(self, temp_dir):
         """Test loading graph from CSV files."""
+        import polars as pl
+
         nodes_path = temp_dir / "nodes.csv"
         edges_path = temp_dir / "edges.csv"
 
-        # Create sample files
-        create_sample_node_csv(nodes_path, num_nodes=5)
+        # Create sample node CSV
+        node_ids = [generate_id() for _ in range(5)]
+        nodes_df = pl.DataFrame({
+            "id": node_ids,
+            "type": ["CODE"] * 5,
+            "content": ["test"] * 5,
+            "status": ["PENDING"] * 5,
+            "created_by": ["system"] * 5,
+        })
+        nodes_df.write_csv(nodes_path)
 
-        # Create edges CSV manually
-        import polars as pl
-        import uuid
-        node_ids = [uuid.uuid4().hex for _ in range(3)]
+        # Create edges CSV with valid node IDs
         edges_df = pl.DataFrame({
             "source_id": [node_ids[0], node_ids[1]],
             "target_id": [node_ids[1], node_ids[2]],
@@ -957,7 +979,7 @@ class TestDataLoader:
 
         # Load graph
         db = load_graph_from_csv(nodes_path, edges_path)
-        assert db.node_count > 0
+        assert db.node_count == 5
 
     def test_load_graph_from_parquet(self, temp_dir):
         """Test loading graph from Parquet files."""
