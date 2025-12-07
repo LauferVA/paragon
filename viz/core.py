@@ -267,6 +267,7 @@ class MutationEvent(msgspec.Struct, kw_only=True):
     Individual mutation event for temporal debugging.
 
     Logged to Rerun.io for "time travel" debugging.
+    Includes correlation_id for cross-referencing with diagnostics logs.
     """
     timestamp: str
     sequence: int
@@ -277,6 +278,9 @@ class MutationEvent(msgspec.Struct, kw_only=True):
     new_status: Optional[str] = None
     agent_id: Optional[str] = None
     agent_role: Optional[str] = None
+
+    # Correlation ID for linking to diagnostics logs
+    correlation_id: Optional[str] = None
 
     # For context pruning events
     nodes_considered: int = 0

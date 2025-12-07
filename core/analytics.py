@@ -537,3 +537,88 @@ def get_type_dependency_matrix(db) -> Dict[str, Dict[str, int]]:
             continue
 
     return matrix
+
+
+# =============================================================================
+# REFACTORING DETECTION (via Alignment)
+# =============================================================================
+
+def detect_graph_changes(
+    db_old,
+    db_new,
+    min_score: float = 0.3,
+) -> Dict[str, any]:
+    """
+    Detect refactoring/structural changes between two graph states.
+
+    Uses the alignment module to compare graphs and identify:
+    - Renamed nodes (matched but name changed)
+    - Added nodes (in new but not old)
+    - Removed nodes (in old but not new)
+    - Unchanged nodes (matched with same name)
+
+    Args:
+        db_old: ParagonDB instance with old state
+        db_new: ParagonDB instance with new state
+        min_score: Minimum matching score to consider (0.0-1.0)
+
+    Returns:
+        Dict with:
+        - renamed: List of (old_id, new_id) tuples
+        - added: List of new_id
+        - removed: List of old_id
+        - unchanged: List of (old_id, new_id) tuples
+        - similarity_score: Overall similarity (0.0-1.0)
+    """
+    try:
+        from core.alignment import detect_refactoring
+
+        # Extract nodes and edges from both databases
+        old_nodes = list(db_old.query_nodes())
+        old_edges = list(db_old.query_edges())
+        new_nodes = list(db_new.query_nodes())
+        new_edges = list(db_new.query_edges())
+
+        return detect_refactoring(old_nodes, old_edges, new_nodes, new_edges)
+
+    except ImportError:
+        return {
+            "renamed": [],
+            "added": [],
+            "removed": [],
+            "unchanged": [],
+            "similarity_score": 0.0,
+            "error": "alignment module not available",
+        }
+    except Exception as e:
+        return {
+            "renamed": [],
+            "added": [],
+            "removed": [],
+            "unchanged": [],
+            "similarity_score": 0.0,
+            "error": str(e),
+        }
+
+
+def compare_graph_snapshots(
+    nodes1: List,
+    edges1: List,
+    nodes2: List,
+    edges2: List,
+) -> float:
+    """
+    Compute similarity between two graph snapshots.
+
+    Args:
+        nodes1, edges1: First graph
+        nodes2, edges2: Second graph
+
+    Returns:
+        Similarity score (0.0-1.0)
+    """
+    try:
+        from core.alignment import compute_similarity
+        return compute_similarity(nodes1, edges1, nodes2, edges2)
+    except ImportError:
+        return 0.0

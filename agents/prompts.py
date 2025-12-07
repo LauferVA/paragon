@@ -169,6 +169,447 @@ def extract_dependency_chain(
     return chain
 
 
+def get_relevant_specs(db: Any, code_node_id: str) -> List[Dict[str, Any]]:
+    """
+    Get the SPEC nodes that a CODE node implements.
+
+    Follows IMPLEMENTS edges to find specifications.
+    Used by Builder to understand what it's implementing.
+
+    Args:
+        db: ParagonDB instance
+        code_node_id: CODE node ID
+
+    Returns:
+        List of SPEC node context dicts
+    """
+    specs = []
+    outgoing = db.get_outgoing_edges(code_node_id)
+
+    for edge in outgoing:
+        if edge.get("type") == "IMPLEMENTS":
+            spec_context = extract_node_context(db, edge.get("target"))
+            if spec_context.get("type") == "SPEC":
+                specs.append(spec_context)
+
+    return specs
+
+
+def get_relevant_tests(db: Any, code_node_id: str) -> List[Dict[str, Any]]:
+    """
+    Get the TEST nodes that test a CODE node.
+
+    Follows TESTS edges to find test suites.
+    Used by Tester to find existing tests.
+
+    Args:
+        db: ParagonDB instance
+        code_node_id: CODE node ID
+
+    Returns:
+        List of TEST node context dicts
+    """
+    tests = []
+    incoming = db.get_incoming_edges(code_node_id)
+
+    for edge in incoming:
+        if edge.get("type") == "TESTS":
+            test_context = extract_node_context(db, edge.get("source"))
+            if test_context.get("type") in ("TEST", "TEST_SUITE"):
+                tests.append(test_context)
+
+    return tests
+
+
+def get_requirement_chain(db: Any, node_id: str) -> List[Dict[str, Any]]:
+    """
+    Trace a node back to its originating REQ nodes.
+
+    Useful for teleological validation - every artifact should
+    trace back to a requirement ("golden thread").
+
+    Args:
+        db: ParagonDB instance
+        node_id: Starting node
+
+    Returns:
+        List of REQ node context dicts in the ancestry chain
+    """
+    reqs = []
+    visited = set()
+    to_visit = [node_id]
+
+    while to_visit:
+        current_id = to_visit.pop(0)
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+
+        current_context = extract_node_context(db, current_id)
+
+        # Check if this is a REQ
+        if current_context.get("type") == "REQ":
+            reqs.append(current_context)
+            continue  # Don't traverse past REQ nodes
+
+        # Get predecessors via outgoing edges (TRACES_TO, IMPLEMENTS, etc.)
+        outgoing = db.get_outgoing_edges(current_id)
+        for edge in outgoing:
+            target_id = edge.get("target")
+            if target_id and target_id not in visited:
+                to_visit.append(target_id)
+
+    return reqs
+
+
+# =============================================================================
+# HYBRID CONTEXT ASSEMBLY (Compiler + Fuzzy)
+# =============================================================================
+
+def assemble_hybrid_context(
+    db: Any,
+    node_id: str,
+    context_type: str = "code_generation",
+    fuzzy_threshold: float = 0.6,
+    fuzzy_limit: int = 3,
+    include_fuzzy: bool = True,
+) -> Dict[str, Any]:
+    """
+    Assemble context using two-layer hybrid approach:
+
+    Layer 1 (Compiler): Graph edges provide deterministic relationships
+    - Dominators: Control-flow gates that MUST be understood
+    - Predecessors: Direct dependencies
+    - Requirements: Golden thread traceability
+
+    Layer 2 (Fuzzy): Semantic similarity for enrichment
+    - Similar implementations: Patterns to follow
+    - Similar tests: Testing strategies to adopt
+    - Similar specs: Related specifications
+
+    Architecture:
+    - Compiler layer is PRIMARY (100% precision, O(V+E) via rustworkx)
+    - Fuzzy layer is SECONDARY (enrichment, threshold >= 0.6)
+    - Fuzzy results never contradict compiler results
+
+    Args:
+        db: ParagonDB instance
+        node_id: Target node to assemble context for
+        context_type: One of:
+            - "code_generation": Building code from specs
+            - "test_generation": Creating tests for code
+            - "research": Exploring requirements/concepts
+            - "attribution": Root cause analysis
+            - "quality_gate": Quality assessment
+            - "clarification": Resolving ambiguities
+        fuzzy_threshold: Minimum similarity score (0.6 recommended)
+        fuzzy_limit: Max fuzzy results per category
+        include_fuzzy: Whether to include fuzzy layer (True by default)
+
+    Returns:
+        Dict with:
+        - compiler_context: Deterministic graph-derived context
+        - fuzzy_context: Semantic similarity-derived context
+        - merged_context: Unified context for prompts
+        - metadata: Assembly statistics
+    """
+    result = {
+        "compiler_context": {},
+        "fuzzy_context": {},
+        "merged_context": {},
+        "metadata": {
+            "node_id": node_id,
+            "context_type": context_type,
+            "fuzzy_enabled": include_fuzzy,
+        },
+    }
+
+    # Verify node exists
+    try:
+        target_node = db.get_node(node_id)
+    except Exception:
+        result["metadata"]["error"] = f"Node {node_id} not found"
+        return result
+
+    # =================================================================
+    # LAYER 1: COMPILER CONTEXT (Deterministic Graph Traversal)
+    # =================================================================
+
+    compiler_ctx = {}
+
+    # Get dominators (economic topology - minimal essential context)
+    dominators = extract_dependency_chain(db, node_id, use_dominators=True)
+    compiler_ctx["dominators"] = dominators
+
+    # Get direct predecessors
+    predecessors = extract_predecessor_context(db, node_id)
+    compiler_ctx["predecessors"] = predecessors
+
+    # Context-specific compiler extraction
+    if context_type == "code_generation":
+        # Get specs this code should implement
+        specs = get_relevant_specs(db, node_id)
+        compiler_ctx["specs"] = specs
+        # Get requirement chain for traceability
+        reqs = get_requirement_chain(db, node_id)
+        compiler_ctx["requirements"] = reqs
+
+    elif context_type == "test_generation":
+        # Get the code to test
+        code_ctx = extract_node_context(db, node_id)
+        compiler_ctx["code"] = code_ctx
+        # Get specs for expected behavior
+        specs = get_relevant_specs(db, node_id)
+        compiler_ctx["specs"] = specs
+        # Get existing tests for patterns
+        existing_tests = get_relevant_tests(db, node_id)
+        compiler_ctx["existing_tests"] = existing_tests
+
+    elif context_type == "research":
+        # Get any existing clarifications
+        incoming = db.get_incoming_edges(node_id)
+        clarifications = []
+        for edge in incoming:
+            if edge.get("type") in ("CLARIFIES", "RESEARCH_FOR"):
+                clarifications.append(extract_node_context(db, edge.get("source")))
+        compiler_ctx["clarifications"] = clarifications
+
+    elif context_type == "attribution":
+        # Get failure context (descendants that failed)
+        descendants = db.get_descendants(node_id)
+        failed = [extract_node_context(db, d.id) for d in descendants
+                  if d.status == "FAILED"]
+        compiler_ctx["failed_descendants"] = failed
+
+    elif context_type == "quality_gate":
+        # Get all artifacts to assess
+        code_ctx = extract_node_context(db, node_id)
+        compiler_ctx["code"] = code_ctx
+        specs = get_relevant_specs(db, node_id)
+        compiler_ctx["specs"] = specs
+        tests = get_relevant_tests(db, node_id)
+        compiler_ctx["tests"] = tests
+
+    elif context_type == "clarification":
+        # Get the requirement being clarified
+        outgoing = db.get_outgoing_edges(node_id)
+        for edge in outgoing:
+            if edge.get("type") == "BLOCKS":
+                compiler_ctx["blocked_req"] = extract_node_context(db, edge.get("target"))
+                break
+
+    result["compiler_context"] = compiler_ctx
+    result["metadata"]["compiler_node_count"] = (
+        len(dominators) + len(predecessors) +
+        sum(len(v) for v in compiler_ctx.values() if isinstance(v, list))
+    )
+
+    # =================================================================
+    # LAYER 2: FUZZY CONTEXT (Semantic Similarity)
+    # =================================================================
+
+    fuzzy_ctx = {}
+
+    if include_fuzzy:
+        # Get IDs already in compiler context to avoid duplicates
+        compiler_ids = set()
+        for nodes in compiler_ctx.values():
+            if isinstance(nodes, list):
+                for n in nodes:
+                    if isinstance(n, dict) and "id" in n:
+                        compiler_ids.add(n["id"])
+            elif isinstance(nodes, dict) and "id" in nodes:
+                compiler_ids.add(nodes["id"])
+        compiler_ids.add(node_id)
+
+        # Use target node's content as query
+        query_text = target_node.content
+
+        if query_text:
+            # Find similar nodes based on context type
+            if context_type == "code_generation":
+                # Find similar CODE implementations
+                similar_code = db.find_similar_nodes(
+                    query=query_text,
+                    threshold=fuzzy_threshold,
+                    limit=fuzzy_limit,
+                    node_type="CODE",
+                    exclude_ids=compiler_ids,
+                )
+                fuzzy_ctx["similar_implementations"] = [
+                    {"id": n.id, "content": n.content[:500], "score": score}
+                    for n, score in similar_code
+                ]
+
+            elif context_type == "test_generation":
+                # Find similar TEST nodes
+                similar_tests = db.find_similar_nodes(
+                    query=query_text,
+                    threshold=fuzzy_threshold,
+                    limit=fuzzy_limit,
+                    node_type="TEST_SUITE",
+                    exclude_ids=compiler_ids,
+                )
+                fuzzy_ctx["similar_tests"] = [
+                    {"id": n.id, "content": n.content[:500], "score": score}
+                    for n, score in similar_tests
+                ]
+
+            elif context_type == "research":
+                # Find similar RESEARCH nodes
+                similar_research = db.find_similar_nodes(
+                    query=query_text,
+                    threshold=fuzzy_threshold,
+                    limit=fuzzy_limit,
+                    node_type="RESEARCH",
+                    exclude_ids=compiler_ids,
+                )
+                fuzzy_ctx["similar_research"] = [
+                    {"id": n.id, "content": n.content[:500], "score": score}
+                    for n, score in similar_research
+                ]
+
+            elif context_type == "attribution":
+                # Find similar failure patterns
+                similar_failures = db.find_similar_nodes(
+                    query=query_text,
+                    threshold=fuzzy_threshold,
+                    limit=fuzzy_limit,
+                    exclude_ids=compiler_ids,
+                )
+                # Filter to only failed nodes
+                fuzzy_ctx["similar_failures"] = [
+                    {"id": n.id, "content": n.content[:500], "score": score, "status": n.status}
+                    for n, score in similar_failures
+                    if n.status == "FAILED"
+                ]
+
+            elif context_type == "quality_gate":
+                # Find similar verified code for comparison
+                similar_verified = db.find_similar_nodes(
+                    query=query_text,
+                    threshold=fuzzy_threshold,
+                    limit=fuzzy_limit,
+                    node_type="CODE",
+                    exclude_ids=compiler_ids,
+                )
+                fuzzy_ctx["similar_verified"] = [
+                    {"id": n.id, "content": n.content[:500], "score": score}
+                    for n, score in similar_verified
+                    if n.status == "VERIFIED"
+                ]
+
+            elif context_type == "clarification":
+                # Find similar clarifications that were resolved
+                similar_clarifications = db.find_similar_nodes(
+                    query=query_text,
+                    threshold=fuzzy_threshold,
+                    limit=fuzzy_limit,
+                    node_type="CLARIFICATION",
+                    exclude_ids=compiler_ids,
+                )
+                fuzzy_ctx["similar_clarifications"] = [
+                    {"id": n.id, "content": n.content[:500], "score": score}
+                    for n, score in similar_clarifications
+                    if n.status == "VERIFIED"  # Resolved clarifications
+                ]
+
+    result["fuzzy_context"] = fuzzy_ctx
+    result["metadata"]["fuzzy_node_count"] = sum(
+        len(v) for v in fuzzy_ctx.values() if isinstance(v, list)
+    )
+
+    # =================================================================
+    # MERGE: Combine Compiler + Fuzzy into Unified Context
+    # =================================================================
+
+    merged = {
+        "target": extract_node_context(db, node_id),
+        "dependencies": compiler_ctx.get("dominators", []),
+        "direct_dependencies": compiler_ctx.get("predecessors", []),
+    }
+
+    # Add context-specific fields
+    for key, value in compiler_ctx.items():
+        if key not in ("dominators", "predecessors"):
+            merged[key] = value
+
+    # Add fuzzy enrichment (clearly labeled)
+    if fuzzy_ctx:
+        merged["similar_examples"] = fuzzy_ctx
+
+    result["merged_context"] = merged
+
+    return result
+
+
+def format_hybrid_context_for_prompt(
+    context: Dict[str, Any],
+    max_chars: int = 8000,
+) -> str:
+    """
+    Format hybrid context into a string suitable for LLM prompts.
+
+    Prioritizes compiler context, adds fuzzy examples as "inspiration".
+
+    Args:
+        context: Result from assemble_hybrid_context()
+        max_chars: Maximum characters for context string
+
+    Returns:
+        Formatted context string
+    """
+    parts = []
+    chars_used = 0
+
+    merged = context.get("merged_context", {})
+
+    # 1. Target node
+    target = merged.get("target", {})
+    if target:
+        section = f"## Target Node\n**ID:** {target.get('id')}\n**Type:** {target.get('type')}\n**Content:**\n{target.get('content', '')[:1000]}\n"
+        parts.append(section)
+        chars_used += len(section)
+
+    # 2. Dependencies (compiler layer - always include)
+    deps = merged.get("dependencies", [])
+    if deps:
+        section = "## Dependencies (Required Context)\n"
+        for dep in deps[:5]:  # Limit to 5 dependencies
+            section += f"- **{dep.get('id')}** ({dep.get('type')}): {dep.get('content', '')[:200]}...\n"
+        parts.append(section)
+        chars_used += len(section)
+
+    # 3. Context-specific compiler context
+    for key in ["specs", "code", "requirements", "tests"]:
+        if key in merged and chars_used < max_chars * 0.7:
+            items = merged[key]
+            if isinstance(items, list):
+                section = f"## {key.title()}\n"
+                for item in items[:3]:
+                    section += f"- **{item.get('id')}**: {item.get('content', '')[:300]}...\n"
+                parts.append(section)
+                chars_used += len(section)
+            elif isinstance(items, dict):
+                section = f"## {key.title()}\n{items.get('content', '')[:500]}\n"
+                parts.append(section)
+                chars_used += len(section)
+
+    # 4. Fuzzy examples (enrichment - only if space remains)
+    similar = merged.get("similar_examples", {})
+    if similar and chars_used < max_chars * 0.85:
+        section = "## Similar Examples (For Inspiration)\n"
+        for category, items in similar.items():
+            if items and chars_used < max_chars:
+                section += f"### {category.replace('_', ' ').title()}\n"
+                for item in items[:2]:
+                    section += f"- [{item.get('score', 0):.2f}] {item.get('content', '')[:200]}...\n"
+        parts.append(section)
+        chars_used += len(section)
+
+    return "\n".join(parts)
+
+
 # =============================================================================
 # ARCHITECT PROMPT BUILDER
 # =============================================================================

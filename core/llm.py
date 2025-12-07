@@ -807,15 +807,45 @@ CRITICAL RULES:
 # =============================================================================
 
 _llm_instance: Optional[StructuredLLM] = None
+_learning_manager = None
+_learning_available = False
+
+# Try to import learning system (optional)
+try:
+    from infrastructure.learning import LearningManager, LearningMode, ModelRecommendation
+    _learning_available = True
+except ImportError:
+    _learning_available = False
 
 
-def get_llm() -> StructuredLLM:
+def get_learning_manager():
+    """Get or create the learning manager (lazy initialization)."""
+    global _learning_manager
+    if _learning_available and _learning_manager is None:
+        try:
+            _learning_manager = LearningManager()
+        except Exception:
+            pass
+    return _learning_manager
+
+
+def get_llm(phase: Optional[str] = None, task_type: Optional[str] = None) -> StructuredLLM:
     """
-    Get the global LLM instance.
+    Get the global LLM instance, optionally with learning-based model selection.
+
+    When learning is enabled in PRODUCTION mode:
+    - Queries historical performance data
+    - Recommends model based on past success rates
+    - Falls back to default if no recommendation
+
+    Args:
+        phase: Optional phase name (e.g., "build", "test") for learning lookup
+        task_type: Optional task type for more specific recommendations
 
     Configurable via environment variables:
     - PARAGON_LLM_MODEL: Model identifier (default: anthropic/claude-sonnet-4-5-20250929)
     - PARAGON_LLM_TEMPERATURE: Temperature (default: 0.0)
+    - PARAGON_LEARNING_ENABLED: Enable learning-based model selection (default: "false")
 
     Model Options (Updated December 2025):
     - anthropic/claude-sonnet-4-5-20250929 (Current flagship, recursive self-correction)
@@ -828,6 +858,43 @@ def get_llm() -> StructuredLLM:
     Note: LiteLLM requires provider prefix (anthropic/, openai/, gemini/, etc.)
     """
     global _llm_instance
+
+    # Check if learning-based model selection is enabled
+    learning_enabled = os.getenv("PARAGON_LEARNING_ENABLED", "false").lower() == "true"
+
+    # Try to get learning-based recommendation
+    recommended_model = None
+    if learning_enabled and _learning_available and phase:
+        try:
+            manager = get_learning_manager()
+            if manager:
+                from agents.schemas import CyclePhase
+                # Convert phase string to CyclePhase enum
+                try:
+                    cycle_phase = CyclePhase(phase.lower())
+                    recommendation = manager.get_model_recommendation(cycle_phase, task_type)
+                    if recommendation:
+                        # Prepend provider if not already there
+                        model_id = recommendation.model_id
+                        if "/" not in model_id:
+                            model_id = f"anthropic/{model_id}"
+                        recommended_model = model_id
+                        logger.debug(
+                            f"Learning: Recommended {model_id} for {phase} "
+                            f"(confidence={recommendation.confidence:.2f}, "
+                            f"success_rate={recommendation.success_rate:.2%})"
+                        )
+                except (ValueError, KeyError):
+                    pass  # Unknown phase, use default
+        except Exception as e:
+            logger.debug(f"Learning-based model selection failed: {e}")
+
+    # Use recommendation or fall back to default/configured model
+    if recommended_model:
+        temperature = float(os.getenv("PARAGON_LLM_TEMPERATURE", "0.0"))
+        return StructuredLLM(model=recommended_model, temperature=temperature)
+
+    # Standard singleton behavior
     if _llm_instance is None:
         # Use current flagship model as default
         model = os.getenv("PARAGON_LLM_MODEL", "anthropic/claude-sonnet-4-5-20250929")

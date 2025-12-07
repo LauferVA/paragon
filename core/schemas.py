@@ -202,6 +202,11 @@ class NodeData(msgspec.Struct, kw_only=True, frozen=False):
     # This creates a chain of provenance - if upstream changes, hash invalidates
     merkle_hash: Optional[str] = None
 
+    # === Semantic Embedding (Hybrid Context Assembly) ===
+    # 384-dimensional vector from all-MiniLM-L6-v2
+    # Pre-computed and stored with node for O(1) similarity lookup
+    embedding: Optional[List[float]] = None
+
     # === Teleology Status (Layer 8) ===
     # Tracks whether this node has a valid chain of causation to a REQ
     # Values: "justified", "unjustified", "root", "orphaned", "unchecked"

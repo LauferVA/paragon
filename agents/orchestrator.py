@@ -49,6 +49,80 @@ try:
 except ImportError:
     DIAGNOSTICS_AVAILABLE = False
 
+# SocraticEngine for gap analysis (dialectic phase)
+try:
+    from requirements.socratic_engine import (
+        SocraticEngine, GapAnalyzer, ALL_QUESTIONS,
+    )
+    _gap_analyzer = GapAnalyzer()
+    SOCRATIC_AVAILABLE = True
+except ImportError:
+    _gap_analyzer = None
+    SOCRATIC_AVAILABLE = False
+
+# Documenter for auto-documentation on success
+try:
+    from agents.documenter import Documenter, generate_all_docs
+    DOCUMENTER_AVAILABLE = True
+except ImportError:
+    DOCUMENTER_AVAILABLE = False
+
+# Quality Gate for enforcing quality floor
+try:
+    from agents.quality_gate import QualityGate, check_quality
+    QUALITY_GATE_AVAILABLE = True
+except ImportError:
+    QUALITY_GATE_AVAILABLE = False
+
+# Analytics for graph health checks
+try:
+    from core.analytics import get_graph_health_report, GraphHealthReport
+    ANALYTICS_AVAILABLE = True
+except ImportError:
+    ANALYTICS_AVAILABLE = False
+
+# Teleology for golden thread validation
+try:
+    from core.teleology import validate_teleology, TeleologyReport
+    TELEOLOGY_AVAILABLE = True
+except ImportError:
+    TELEOLOGY_AVAILABLE = False
+
+# Resource Guard for OOM protection
+try:
+    from core.resource_guard import ResourceGuard, ResourceSignal
+    RESOURCE_GUARD_AVAILABLE = True
+except ImportError:
+    RESOURCE_GUARD_AVAILABLE = False
+
+# Attribution for failure analysis
+try:
+    from infrastructure.attribution import ForensicAnalyzer, AttributionResult
+    ATTRIBUTION_AVAILABLE = True
+except ImportError:
+    ATTRIBUTION_AVAILABLE = False
+
+# Divergence for test/prod mismatch detection
+try:
+    from infrastructure.divergence import DivergenceDetector
+    DIVERGENCE_AVAILABLE = True
+except ImportError:
+    DIVERGENCE_AVAILABLE = False
+
+# Diagnostics for correlation ID tracking
+try:
+    from infrastructure.diagnostics import diag, generate_correlation_id
+    DIAGNOSTICS_CORRELATION_AVAILABLE = True
+except ImportError:
+    DIAGNOSTICS_CORRELATION_AVAILABLE = False
+
+# Training store for learning system persistence
+try:
+    from infrastructure.training_store import TrainingStore
+    TRAINING_STORE_AVAILABLE = True
+except ImportError:
+    TRAINING_STORE_AVAILABLE = False
+
 # Optional LLM integration (graceful degradation if not configured)
 try:
     from core.llm import get_llm, StructuredLLM
@@ -132,6 +206,91 @@ def list_append_reducer(existing: List, new: List) -> List:
     if new is None:
         return existing
     return existing + new
+
+
+# =============================================================================
+# TOPOLOGY-DRIVEN PHASE INFERENCE
+# =============================================================================
+
+def infer_phase_from_node(db, node_id: str) -> str:
+    """
+    Infer the current phase based on node type and graph structure.
+
+    Instead of tracking phase as explicit state, derive it from topology:
+    - REQ with no RESEARCH → needs dialectic/research
+    - REQ with RESEARCH but no SPEC → needs planning
+    - SPEC with no CODE → needs building
+    - CODE with no TEST → needs testing
+    - CODE with FAILED TEST → needs fixing
+
+    This is the "Phase as Emergent Property" principle from CLAUDE.md.
+
+    Args:
+        db: ParagonDB instance
+        node_id: The node to analyze
+
+    Returns:
+        Inferred phase string matching CyclePhase values
+    """
+    from core.ontology import NodeType, NodeStatus, EdgeType
+
+    try:
+        node = db.get_node(node_id)
+    except Exception:
+        return CyclePhase.INIT.value
+
+    node_type = node.type
+    node_status = node.status
+
+    # Get edges
+    outgoing = db.get_outgoing_edges(node_id)
+    incoming = db.get_incoming_edges(node_id)
+    outgoing_types = {e.get("type") for e in outgoing}
+    incoming_types = {e.get("type") for e in incoming}
+
+    # Phase inference based on node type and structure
+    if node_type == NodeType.REQ.value:
+        if EdgeType.RESEARCH_FOR.value not in incoming_types:
+            return CyclePhase.DIALECTIC.value
+        if EdgeType.TRACES_TO.value not in incoming_types:
+            return CyclePhase.PLAN.value
+        return CyclePhase.PASSED.value
+
+    elif node_type == NodeType.RESEARCH.value:
+        if node_status == NodeStatus.PENDING.value:
+            return CyclePhase.RESEARCH.value
+        return CyclePhase.PLAN.value
+
+    elif node_type == NodeType.SPEC.value:
+        if EdgeType.IMPLEMENTS.value not in incoming_types:
+            return CyclePhase.BUILD.value
+        return CyclePhase.TEST.value
+
+    elif node_type == NodeType.CODE.value:
+        if EdgeType.TESTS.value not in incoming_types:
+            return CyclePhase.TEST.value
+        # Check if tests passed
+        for edge in incoming:
+            if edge.get("type") == EdgeType.TESTS.value:
+                try:
+                    test_node = db.get_node(edge.get("source"))
+                    if test_node.status == NodeStatus.FAILED.value:
+                        return CyclePhase.FIX.value
+                except Exception:
+                    pass
+        return CyclePhase.PASSED.value
+
+    elif node_type == NodeType.TEST_SUITE.value:
+        if node_status == NodeStatus.FAILED.value:
+            return CyclePhase.FIX.value
+        return CyclePhase.PASSED.value
+
+    elif node_type == NodeType.CLARIFICATION.value:
+        if node_status == NodeStatus.PENDING.value:
+            return CyclePhase.CLARIFICATION.value
+        return CyclePhase.RESEARCH.value
+
+    return CyclePhase.INIT.value
 
 
 class GraphState(TypedDict):
@@ -220,6 +379,10 @@ def dialectic_node(state: GraphState) -> Dict[str, Any]:
     Analyzes the requirement for subjective terms, undefined references,
     and missing context. Creates clarification questions if needed.
 
+    Uses both:
+    1. LLM-based analysis (DialectorOutput)
+    2. SocraticEngine gap analysis (canonical questions)
+
     Flow:
     - If CLEAR: proceed to RESEARCH
     - If NEEDS_CLARIFICATION: proceed to CLARIFICATION (wait for user)
@@ -235,6 +398,32 @@ def dialectic_node(state: GraphState) -> Dict[str, Any]:
     ambiguities = []
     clarification_questions = []
     next_phase = CyclePhase.RESEARCH.value  # Default: proceed to research
+
+    # Run SocraticEngine gap analysis first (fast, deterministic)
+    if SOCRATIC_AVAILABLE and _gap_analyzer:
+        try:
+            gaps = _gap_analyzer.analyze_spec(spec)
+            if gaps:
+                messages.append({
+                    "role": "tool",
+                    "content": f"Socratic gap analysis found {len(gaps)} gap(s)",
+                    "tool_name": "socratic_engine",
+                    "tool_result": {"gap_count": len(gaps)},
+                })
+                # Convert gaps to clarification questions
+                for gap in gaps:
+                    if gap.severity in ("critical", "high"):
+                        question = ALL_QUESTIONS.get(gap.question_id)
+                        if question:
+                            clarification_questions.append({
+                                "question": question.question,
+                                "category": question.category,
+                                "text": gap.context,
+                                "suggested_answer": gap.suggestion,
+                                "source": "socratic",
+                            })
+        except Exception as e:
+            logger.debug(f"Socratic gap analysis failed: {e}")
 
     if LLM_AVAILABLE:
         try:
@@ -354,15 +543,60 @@ def clarification_node(state: GraphState) -> Dict[str, Any]:
     Clarification phase - wait for and process user responses.
 
     This node handles the human-in-the-loop interaction:
+    - Prioritizes questions using AdaptiveQuestioner (if available)
     - Presents questions to user
     - Waits for responses
+    - Records outcomes for learning
     - Incorporates feedback into the spec
     """
     questions = state.get("clarification_questions", [])
     human_response = state.get("human_response", None)
     spec = state.get("spec", "")
+    session_id = state.get("session_id", "unknown")
 
     messages = []
+
+    # Try to use AdaptiveQuestioner for smart prioritization
+    prioritized_questions = questions
+    adaptive_questioner = None
+    try:
+        from agents.adaptive_questioner import AdaptiveQuestioner, UserPriorities
+        from agents.schemas import AmbiguityMarker
+
+        adaptive_questioner = AdaptiveQuestioner()
+
+        # Convert questions to AmbiguityMarker format if needed
+        ambiguities = []
+        for q in questions:
+            if isinstance(q, dict):
+                ambiguities.append(AmbiguityMarker(
+                    text=q.get("question", q.get("phrase", "")),
+                    category=q.get("category", "MISSING_CONTEXT"),
+                    impact=q.get("impact", "CLARIFYING"),
+                    suggested_question=q.get("question"),
+                    suggested_answer=q.get("suggested_answer"),
+                ))
+            elif hasattr(q, 'category'):
+                ambiguities.append(q)
+
+        if ambiguities:
+            # Prioritize questions by expected information gain
+            prioritized = adaptive_questioner.prioritize_questions(ambiguities)
+            # Convert back to dict format for display
+            prioritized_questions = [
+                {
+                    "phrase": a.text,  # Use text as phrase for display
+                    "question": a.suggested_question or a.text,
+                    "category": a.category,
+                    "suggested_answer": a.suggested_answer,
+                }
+                for a in prioritized
+            ]
+            logger.debug(f"AdaptiveQuestioner prioritized {len(prioritized_questions)} questions")
+    except ImportError:
+        pass  # AdaptiveQuestioner not available
+    except Exception as e:
+        logger.debug(f"AdaptiveQuestioner failed: {e}")
 
     if human_response:
         # User has provided responses - incorporate them
@@ -370,6 +604,28 @@ def clarification_node(state: GraphState) -> Dict[str, Any]:
             "role": "user",
             "content": f"User clarification: {human_response}"
         })
+
+        # Record question outcomes for learning (if adaptive questioner available)
+        if adaptive_questioner:
+            try:
+                for q in questions:
+                    if isinstance(q, dict):
+                        from agents.schemas import AmbiguityMarker
+                        amb = AmbiguityMarker(
+                            text=q.get("question", q.get("phrase", "")),
+                            category=q.get("category", "MISSING_CONTEXT"),
+                            impact="CLARIFYING",
+                        )
+                        adaptive_questioner.record_question_outcome(
+                            session_id=session_id,
+                            ambiguity=amb,
+                            was_answered=True,
+                            user_answer=human_response,
+                            used_suggestion=False,
+                            answer_quality_score=0.8,  # User provided response
+                        )
+            except Exception as e:
+                logger.debug(f"Failed to record question outcome: {e}")
 
         # Augment the spec with clarifications
         augmented_spec = f"""{spec}
@@ -390,11 +646,15 @@ def clarification_node(state: GraphState) -> Dict[str, Any]:
             "pending_human_input": None,
         }
     else:
-        # Still waiting for user input - format questions for display
+        # Still waiting for user input - format prioritized questions for display
         question_text = "Please clarify the following:\n\n"
-        for i, q in enumerate(questions, 1):
+        for i, q in enumerate(prioritized_questions, 1):
             question_text += f"{i}. {q.get('question', q.get('phrase', 'Unknown'))}\n"
-            question_text += f"   (Category: {q.get('category', 'unknown')})\n\n"
+            question_text += f"   (Category: {q.get('category', 'unknown')})\n"
+            # Show suggested answer if available
+            if q.get('suggested_answer'):
+                question_text += f"   Suggested: {q.get('suggested_answer')}\n"
+            question_text += "\n"
 
         messages.append({
             "role": "assistant",
@@ -815,10 +1075,14 @@ def test_node(state: GraphState) -> Dict[str, Any]:
 
     - Run test suite
     - Check coverage
+    - Enforce quality floor (if tests pass)
+    - Check for divergence
     - Determine pass/fail
     """
     iteration = state.get("iteration", 0)
+    session_id = state.get("session_id", "unknown")
     existing_results = state.get("test_results", [])
+    code_node_ids = state.get("code_node_ids", [])
 
     # Simulate test result (would be real in production)
     # Pass after first test failure and fix cycle
@@ -844,6 +1108,59 @@ def test_node(state: GraphState) -> Dict[str, Any]:
         },
     ]
 
+    quality_violations = []
+
+    # Quality Gate: enforce quality floor BEFORE declaring success
+    if test_passed and QUALITY_GATE_AVAILABLE:
+        try:
+            quality_report = check_quality(
+                test_pass_rate=1.0,
+                node_ids=code_node_ids,
+            )
+            if not quality_report.passed:
+                # Tests passed but quality floor failed
+                test_passed = False
+                quality_violations = [v.description for v in quality_report.violations]
+                messages.append({
+                    "role": "tool",
+                    "content": f"Quality gate FAILED: {len(quality_report.violations)} violation(s)",
+                    "tool_name": "quality_gate",
+                    "tool_result": {
+                        "passed": False,
+                        "violations": quality_violations,
+                    },
+                })
+            else:
+                messages.append({
+                    "role": "tool",
+                    "content": "Quality gate PASSED",
+                    "tool_name": "quality_gate",
+                    "tool_result": {"passed": True},
+                })
+        except Exception as e:
+            logger.debug(f"Quality gate check failed: {e}")
+
+    # Divergence detection: log for learning system
+    if DIVERGENCE_AVAILABLE and TRAINING_STORE_AVAILABLE:
+        try:
+            store = TrainingStore()
+            detector = DivergenceDetector(store)
+            # Check for divergence (would compare with production outcomes in real system)
+            divergence = detector.check_divergence(
+                session_id=session_id,
+                test_passed=test_passed,
+                prod_outcome="pending",  # Would be actual prod outcome
+            )
+            if divergence:
+                messages.append({
+                    "role": "tool",
+                    "content": f"Divergence detected: {divergence.divergence_type}",
+                    "tool_name": "divergence_detector",
+                    "tool_result": {"type": divergence.divergence_type},
+                })
+        except Exception as e:
+            logger.debug(f"Divergence detection failed: {e}")
+
     # Determine next phase
     if test_passed:
         next_phase = CyclePhase.PASSED.value
@@ -855,6 +1172,7 @@ def test_node(state: GraphState) -> Dict[str, Any]:
         "messages": messages,
         "test_results": [test_result],  # Will be appended by reducer
         "last_test_passed": test_passed,
+        "quality_violations": quality_violations,
     }
 
 
@@ -913,9 +1231,12 @@ def passed_node(state: GraphState) -> Dict[str, Any]:
 
     - Finalize artifacts
     - Update node statuses
+    - Validate teleology (golden thread)
     - Generate report
+    - Trigger documentation generation (via integration)
     """
     iteration = state.get("iteration", 0)
+    session_id = state.get("session_id", "unknown")
 
     # Check graph integrity
     cycle_result = check_cycle()
@@ -933,10 +1254,61 @@ def passed_node(state: GraphState) -> Dict[str, Any]:
         },
     ]
 
+    teleology_valid = True
+
+    # Teleology: Validate the golden thread (all nodes trace to REQ)
+    if TELEOLOGY_AVAILABLE:
+        try:
+            from agents.tools import _db
+            if _db is not None:
+                report = validate_teleology(_db._graph, _db._node_map, _db._inv_map)
+                teleology_valid = report.is_valid
+
+                messages.append({
+                    "role": "tool",
+                    "content": (
+                        f"Teleology: {'VALID' if report.is_valid else 'INVALID'} - "
+                        f"{report.justified_count}/{report.total_nodes - report.root_count} justified "
+                        f"({report.justification_rate:.0%})"
+                    ),
+                    "tool_name": "teleology_validator",
+                    "tool_result": {
+                        "is_valid": report.is_valid,
+                        "justified_count": report.justified_count,
+                        "unjustified_count": report.unjustified_count,
+                        "orphaned_count": report.orphaned_count,
+                        "unjustified_nodes": report.unjustified_nodes[:5],  # First 5 only
+                    },
+                })
+
+                if not report.is_valid:
+                    logger.warning(
+                        f"Teleology check found {report.unjustified_count} unjustified nodes: "
+                        f"{report.unjustified_nodes[:3]}"
+                    )
+        except Exception as e:
+            logger.debug(f"Teleology validation failed: {e}")
+
+    # Trigger documentation generation
+    if DOCUMENTER_AVAILABLE:
+        try:
+            from agents.tools import _db
+            if _db is not None:
+                doc_results = generate_all_docs(db=_db)
+                messages.append({
+                    "role": "tool",
+                    "content": f"Documentation generated: {doc_results}",
+                    "tool_name": "documenter",
+                    "tool_result": doc_results,
+                })
+        except Exception as e:
+            logger.debug(f"Documentation generation failed: {e}")
+
     return {
         "phase": CyclePhase.PASSED.value,
         "messages": messages,
         "final_status": "passed",
+        "teleology_valid": teleology_valid,
     }
 
 
@@ -945,21 +1317,68 @@ def failed_node(state: GraphState) -> Dict[str, Any]:
     Failure terminal state.
 
     - Log failures
+    - Perform forensic attribution (root cause analysis)
     - Preserve state for debugging
     - Optionally request human intervention
     """
     errors = state.get("errors", [])
+    session_id = state.get("session_id", "unknown")
+    test_results = state.get("test_results", [])
 
     messages = [{
         "role": "assistant",
         "content": f"TDD cycle FAILED with {len(errors)} error(s)"
     }]
 
+    # Attribution: Perform root cause analysis if available
+    attribution_results = []
+    if ATTRIBUTION_AVAILABLE and TRAINING_STORE_AVAILABLE:
+        try:
+            store = TrainingStore()
+            analyzer = ForensicAnalyzer(store)
+
+            # Build failure list from errors and test results
+            failures = []
+            for error in errors:
+                failures.append({
+                    "error_type": "CycleError",
+                    "error_message": str(error),
+                })
+
+            for result in test_results:
+                if not result.get("passed", True):
+                    for err in result.get("errors", []):
+                        failures.append({
+                            "error_type": "TestError",
+                            "error_message": str(err),
+                        })
+
+            if failures:
+                results = analyzer.analyze_session_failures(session_id, failures)
+                for attr in results:
+                    attribution_results.append({
+                        "failure_code": attr.failure_code.value,
+                        "attributed_agent": attr.attributed_agent_id,
+                        "attributed_phase": attr.attributed_phase.value,
+                        "confidence": attr.confidence,
+                        "reasoning": attr.reasoning[:200],  # Truncate for message
+                    })
+
+                messages.append({
+                    "role": "tool",
+                    "content": f"Attribution analysis: {len(results)} failure(s) analyzed",
+                    "tool_name": "forensic_analyzer",
+                    "tool_result": {"attributions": attribution_results},
+                })
+        except Exception as e:
+            logger.debug(f"Attribution analysis failed: {e}")
+
     return {
         "phase": CyclePhase.FAILED.value,
         "messages": messages,
         "final_status": "failed",
         "pending_human_input": HumanCheckpointType.REVIEW.value,
+        "attribution_results": attribution_results,
     }
 
 
@@ -1186,6 +1605,16 @@ class TDDOrchestrator:
                     logger.warning("SqliteSaver not available, falling back to MemorySaver")
         self.graph = create_orchestrator(self.checkpointer)
 
+        # Infrastructure is initialized lazily:
+        # - MutationLogger: on first add_node_safe call (tools.py)
+        # - GapAnalyzer: at module import (orchestrator.py)
+        # - Documenter: on passed_node (orchestrator.py)
+        self.infrastructure_status = {
+            "socratic": SOCRATIC_AVAILABLE,
+            "documenter": DOCUMENTER_AVAILABLE,
+        }
+        logger.info(f"Infrastructure available: {self.infrastructure_status}")
+
     def run(
         self,
         session_id: str,
@@ -1223,6 +1652,34 @@ class TDDOrchestrator:
         if fresh and self.checkpointer:
             effective_session_id = f"{session_id}_{uuid.uuid4().hex[:8]}"
 
+        # Resource Guard: Check system resources before starting
+        resource_ok = True
+        if RESOURCE_GUARD_AVAILABLE:
+            try:
+                guard = ResourceGuard()
+                signal = guard.check()
+                if signal == ResourceSignal.CRITICAL:
+                    logger.warning("ResourceGuard: CRITICAL - system resources low, run may fail")
+                    resource_ok = False
+                elif signal == ResourceSignal.WARNING:
+                    logger.info("ResourceGuard: WARNING - system resources getting low")
+            except Exception as e:
+                logger.debug(f"ResourceGuard check failed: {e}")
+
+        # Analytics: Log initial graph health before run
+        if ANALYTICS_AVAILABLE:
+            try:
+                from agents.tools import _db
+                if _db is not None:
+                    health = get_graph_health_report(_db)
+                    logger.info(
+                        f"Graph health before run: {health.total_nodes} nodes, "
+                        f"{health.total_edges} edges, density={health.density:.3f}, "
+                        f"hotspots={health.hotspot_count}, orphans={health.orphan_count}"
+                    )
+            except Exception as e:
+                logger.debug(f"Analytics health check failed: {e}")
+
         initial_state: GraphState = {
             "session_id": effective_session_id,
             "task_id": task_id,
@@ -1248,13 +1705,37 @@ class TDDOrchestrator:
         # Initialize diagnostics for this run
         if DIAGNOSTICS_AVAILABLE:
             diag = get_diagnostics()
-            diag.set_session(effective_session_id)
+            correlation_id = diag.set_session(effective_session_id)
             diag.print_state_summary(use_color=False)  # Log initial state
+
+            # Link correlation ID to MutationLogger for cross-referencing
+            try:
+                from infrastructure.logger import get_logger as get_mutation_logger
+                mutation_logger = get_mutation_logger()
+                mutation_logger.set_correlation_id(correlation_id)
+                logger.debug(f"Linked correlation_id={correlation_id} to MutationLogger")
+            except Exception as e:
+                logger.debug(f"Failed to link correlation_id to MutationLogger: {e}")
 
         # Run to completion and collect final state
         final_state = initial_state.copy()
         current_phase = None
         for event in self.graph.stream(initial_state, config):
+            # Resource Guard: Check mid-run if resources are critical
+            if RESOURCE_GUARD_AVAILABLE:
+                try:
+                    guard = ResourceGuard()
+                    signal = guard.check()
+                    if signal == ResourceSignal.CRITICAL:
+                        logger.error("ResourceGuard: CRITICAL during run - aborting to prevent OOM")
+                        final_state["errors"] = final_state.get("errors", []) + [
+                            "Run aborted: system resources critically low"
+                        ]
+                        final_state["final_status"] = "aborted"
+                        break
+                except Exception:
+                    pass
+
             # Each event is {node_name: state_updates}
             for node_name, updates in event.items():
                 # Track phase transitions for diagnostics
@@ -1283,6 +1764,19 @@ class TDDOrchestrator:
                 success = final_state.get("final_status") == "passed"
                 diag.end_phase(success=success)
             diag.print_summary(use_color=False)
+
+        # Analytics: Log final graph health after run
+        if ANALYTICS_AVAILABLE:
+            try:
+                from agents.tools import _db
+                if _db is not None:
+                    health = get_graph_health_report(_db)
+                    logger.info(
+                        f"Graph health after run: {health.total_nodes} nodes, "
+                        f"{health.total_edges} edges, is_dag={health.is_dag}"
+                    )
+            except Exception as e:
+                logger.debug(f"Analytics health check failed: {e}")
 
         return final_state
 

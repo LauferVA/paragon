@@ -19,7 +19,7 @@ Layer 7 Architecture:
 - Layer 7A (Creator): LLM generates structures via core/llm.py
 - Layer 7B (Auditor): This module provides guardrails before graph insertion
 """
-from typing import List, Dict, Any, Optional, Annotated, Tuple
+from typing import List, Dict, Any, Optional, Annotated, Tuple, Callable
 from pathlib import Path
 import msgspec
 
@@ -28,6 +28,18 @@ from core.schemas import NodeData, EdgeData
 from core.ontology import NodeType, NodeStatus, EdgeType
 from domain.code_parser import CodeParser, parse_python_directory
 
+# Data Loader for bulk import (optional)
+try:
+    from infrastructure.data_loader import (
+        PolarsLoader,
+        BulkIngestor,
+        load_graph_from_parquet,
+        load_graph_from_csv,
+    )
+    DATA_LOADER_AVAILABLE = True
+except ImportError:
+    DATA_LOADER_AVAILABLE = False
+
 
 # =============================================================================
 # GLOBAL STATE
@@ -35,6 +47,102 @@ from domain.code_parser import CodeParser, parse_python_directory
 
 _db: Optional[ParagonDB] = None
 _parser: Optional[CodeParser] = None
+_mutation_logger = None  # Lazy-initialized MutationLogger
+_git_sync = None  # Lazy-initialized GitSync
+_pending_transaction: List[tuple] = []  # Collect mutations for git commit
+
+
+def _get_mutation_logger():
+    """Get or create the mutation logger (lazy initialization)."""
+    global _mutation_logger
+    if _mutation_logger is None:
+        try:
+            from infrastructure.logger import MutationLogger
+            _mutation_logger = MutationLogger()
+        except ImportError:
+            pass  # Logger not available
+    return _mutation_logger
+
+
+def _get_git_sync():
+    """Get or create the GitSync instance (lazy initialization)."""
+    global _git_sync
+    if _git_sync is None:
+        try:
+            from infrastructure.git_sync import GitSync, load_git_config
+            config = load_git_config(_db)
+            _git_sync = GitSync(config=config, db=_db)
+        except ImportError:
+            pass  # GitSync not available
+    return _git_sync
+
+
+def _record_transaction(node_id: str, node_type: str, edge_info: Optional[tuple] = None):
+    """Record a mutation for the current transaction batch."""
+    global _pending_transaction
+    _pending_transaction.append(("node", node_id, node_type))
+    if edge_info:
+        _pending_transaction.append(("edge", edge_info[0], edge_info[1], edge_info[2]))
+
+
+def flush_transaction(agent_id: str = "agent"):
+    """
+    Flush pending mutations to GitSync for commit.
+
+    Call this at transaction boundaries (e.g., after a batch of related changes).
+    """
+    global _pending_transaction
+    git_sync = _get_git_sync()
+    if git_sync and _pending_transaction:
+        try:
+            nodes_created = [t[1] for t in _pending_transaction if t[0] == "node"]
+            edges_created = [(t[1], t[2], t[3]) for t in _pending_transaction if t[0] == "edge"]
+            git_sync.on_transaction_complete(
+                nodes_created=nodes_created,
+                edges_created=edges_created,
+                agent_id=agent_id,
+            )
+        except Exception:
+            pass  # Don't fail on git errors
+        finally:
+            _pending_transaction = []
+
+
+def _log_node_created(node_id: str, node_type: str, created_by: str):
+    """Log a node creation event and record for transaction."""
+    # Log to MutationLogger
+    logger = _get_mutation_logger()
+    if logger:
+        try:
+            logger.log_node_created(
+                node_id=node_id,
+                node_type=node_type,
+                agent_id=created_by,
+            )
+        except Exception:
+            pass  # Don't fail on logging errors
+
+    # Record for GitSync transaction
+    _record_transaction(node_id, node_type)
+
+
+def _log_edge_created(source_id: str, target_id: str, edge_type: str):
+    """Log an edge creation event and record for transaction."""
+    # Log to MutationLogger
+    logger = _get_mutation_logger()
+    if logger:
+        try:
+            logger.log_edge_created(
+                source_id=source_id,
+                target_id=target_id,
+                edge_type=edge_type,
+            )
+        except Exception:
+            pass
+
+    # Record for GitSync transaction
+    global _pending_transaction
+    _pending_transaction.append(("edge", source_id, target_id, edge_type))
 
 
 def get_db() -> ParagonDB:
@@ -656,6 +764,139 @@ def parse_source(
 
 
 # =============================================================================
+# BULK IMPORT/EXPORT OPERATIONS
+# =============================================================================
+
+class BulkImportResult(msgspec.Struct, kw_only=True):
+    """Result of a bulk import operation."""
+    success: bool
+    nodes_imported: int = 0
+    edges_imported: int = 0
+    format: str = ""
+    message: str = ""
+
+
+def import_graph_from_file(
+    nodes_path: Annotated[str, "Path to nodes file (CSV, Parquet, or Arrow)"],
+    edges_path: Annotated[Optional[str], "Path to edges file (optional)"] = None,
+    format: Annotated[str, "File format: csv, parquet, or arrow"] = "parquet",
+) -> BulkImportResult:
+    """
+    Bulk import graph data from files.
+
+    Efficiently populates the graph from CSV, Parquet, or Arrow files.
+    Uses Polars lazy evaluation for optimal performance with large datasets.
+
+    Args:
+        nodes_path: Path to nodes file
+        edges_path: Optional path to edges file
+        format: File format (csv, parquet, arrow)
+
+    Returns:
+        BulkImportResult with import counts
+    """
+    if not DATA_LOADER_AVAILABLE:
+        return BulkImportResult(
+            success=False,
+            message="Data loader not available (infrastructure.data_loader not found)"
+        )
+
+    db = get_db()
+    nodes_path_obj = Path(nodes_path)
+
+    if not nodes_path_obj.exists():
+        return BulkImportResult(
+            success=False,
+            message=f"Nodes file not found: {nodes_path}"
+        )
+
+    try:
+        ingestor = BulkIngestor(db)
+        nodes_count, edges_count = ingestor.ingest_from_files(
+            nodes_path=nodes_path,
+            edges_path=edges_path,
+            format=format,
+        )
+
+        return BulkImportResult(
+            success=True,
+            nodes_imported=nodes_count,
+            edges_imported=edges_count,
+            format=format,
+            message=f"Imported {nodes_count} nodes and {edges_count} edges from {format} files"
+        )
+    except Exception as e:
+        return BulkImportResult(
+            success=False,
+            format=format,
+            message=f"Import failed: {e}"
+        )
+
+
+def export_graph_to_parquet(
+    nodes_path: Annotated[str, "Output path for nodes.parquet"],
+    edges_path: Annotated[str, "Output path for edges.parquet"],
+) -> Dict[str, Any]:
+    """
+    Export graph data to Parquet files.
+
+    Parquet is efficient for large datasets:
+    - Columnar storage
+    - Built-in compression
+    - Fast read/write via Polars
+
+    Args:
+        nodes_path: Output path for nodes
+        edges_path: Output path for edges
+
+    Returns:
+        Dict with export results
+    """
+    import polars as pl
+
+    db = get_db()
+
+    try:
+        # Export nodes
+        nodes = list(db.query_nodes())
+        if nodes:
+            nodes_data = [{
+                "id": n.id,
+                "type": n.type,
+                "content": n.content,
+                "status": n.status,
+                "created_by": n.created_by,
+            } for n in nodes]
+            nodes_df = pl.DataFrame(nodes_data)
+            nodes_df.write_parquet(nodes_path)
+
+        # Export edges
+        edges = list(db.query_edges())
+        if edges:
+            edges_data = [{
+                "source_id": e.source_id,
+                "target_id": e.target_id,
+                "type": e.type,
+                "weight": e.weight,
+            } for e in edges]
+            edges_df = pl.DataFrame(edges_data)
+            edges_df.write_parquet(edges_path)
+
+        return {
+            "success": True,
+            "nodes_exported": len(nodes),
+            "edges_exported": len(edges),
+            "nodes_path": nodes_path,
+            "edges_path": edges_path,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
+# =============================================================================
 # ALIGNMENT OPERATIONS
 # =============================================================================
 
@@ -1120,6 +1361,23 @@ def add_node_safe(
                 violations=violations,
                 message="Topology validation failed"
             )
+
+        # Compute embedding for hybrid context assembly
+        try:
+            from core.embeddings import compute_embedding, is_available
+            if is_available() and content:
+                embedding = compute_embedding(content)
+                if embedding is not None:
+                    node.embedding = embedding
+        except ImportError:
+            pass  # Embeddings not available
+
+        # Log successful node creation
+        _log_node_created(node.id, node_type, created_by)
+
+        # Log edge creation if IMPLEMENTS edge was added
+        if node_type == NodeType.CODE.value and spec_id:
+            _log_edge_created(spec_id, node.id, EdgeType.IMPLEMENTS.value)
 
         return SafeNodeResult(
             success=True,

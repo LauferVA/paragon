@@ -806,6 +806,204 @@ class ParagonDB:
         return self.get_nodes_by_status(NodeStatus.PENDING.value)
 
     # =========================================================================
+    # SEMANTIC SIMILARITY (Hybrid Context Assembly - Fuzzy Layer)
+    # =========================================================================
+
+    def find_similar_nodes(
+        self,
+        query: str,
+        threshold: float = 0.6,
+        limit: int = 5,
+        node_type: Optional[str] = None,
+        exclude_ids: Optional[Set[str]] = None,
+    ) -> List[Tuple[NodeData, float]]:
+        """
+        Find nodes semantically similar to a query text.
+
+        This is the FUZZY layer of hybrid context assembly.
+        Use in conjunction with graph edges (compiler layer) for best results.
+
+        Architecture:
+        - Query: Compute embedding for query text
+        - Search: O(n) cosine similarity scan over node embeddings
+        - Filter: Apply type filter and exclusion set
+        - Rank: Return top-k by similarity score
+
+        Args:
+            query: Text to find similar nodes for
+            threshold: Minimum cosine similarity (0.6 recommended)
+            limit: Maximum nodes to return
+            node_type: Optional filter by node type
+            exclude_ids: Node IDs to exclude from results
+
+        Returns:
+            List of (NodeData, similarity_score) tuples, sorted by score
+
+        Note:
+            Returns empty list if embeddings unavailable or no matches found.
+            This graceful degradation allows compiler-only fallback.
+        """
+        try:
+            from core.embeddings import compute_embedding, cosine_similarity, is_available
+        except ImportError:
+            return []
+
+        if not is_available():
+            return []
+
+        # Compute query embedding
+        query_embedding = compute_embedding(query)
+        if query_embedding is None:
+            return []
+
+        exclude_ids = exclude_ids or set()
+        results = []
+
+        for node in self._graph.nodes():
+            # Apply filters
+            if node.id in exclude_ids:
+                continue
+            if node_type and node.type != node_type:
+                continue
+            if node.embedding is None:
+                continue
+
+            # Compute similarity
+            score = cosine_similarity(query_embedding, node.embedding)
+            if score >= threshold:
+                results.append((node, score))
+
+        # Sort by score descending
+        results.sort(key=lambda x: x[1], reverse=True)
+
+        return results[:limit]
+
+    def find_similar_to_node(
+        self,
+        node_id: str,
+        threshold: float = 0.6,
+        limit: int = 5,
+        node_type: Optional[str] = None,
+    ) -> List[Tuple[NodeData, float]]:
+        """
+        Find nodes similar to an existing node by its embedding.
+
+        Useful for finding related implementations, tests, or patterns.
+
+        Args:
+            node_id: Node to find similar nodes for
+            threshold: Minimum similarity score
+            limit: Maximum results
+            node_type: Optional type filter
+
+        Returns:
+            List of (NodeData, score) tuples (excludes the query node)
+        """
+        if node_id not in self._node_map:
+            return []
+
+        node = self.get_node(node_id)
+        if node.embedding is None:
+            # Fallback: use content text
+            return self.find_similar_nodes(
+                query=node.content,
+                threshold=threshold,
+                limit=limit,
+                node_type=node_type,
+                exclude_ids={node_id},
+            )
+
+        # Use existing embedding for faster lookup
+        try:
+            from core.embeddings import cosine_similarity
+        except ImportError:
+            return []
+
+        exclude_ids = {node_id}
+        results = []
+
+        for other in self._graph.nodes():
+            if other.id in exclude_ids:
+                continue
+            if node_type and other.type != node_type:
+                continue
+            if other.embedding is None:
+                continue
+
+            score = cosine_similarity(node.embedding, other.embedding)
+            if score >= threshold:
+                results.append((other, score))
+
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results[:limit]
+
+    def update_node_embedding(self, node_id: str) -> bool:
+        """
+        Compute and store embedding for a node.
+
+        Called automatically during node creation if embeddings available.
+        Can also be called manually to update stale embeddings.
+
+        Args:
+            node_id: Node to update
+
+        Returns:
+            True if embedding was computed, False otherwise
+        """
+        if node_id not in self._node_map:
+            return False
+
+        try:
+            from core.embeddings import compute_embedding
+        except ImportError:
+            return False
+
+        node = self.get_node(node_id)
+        embedding = compute_embedding(node.content)
+        if embedding is not None:
+            node.embedding = embedding
+            return True
+        return False
+
+    def update_all_embeddings(self, batch_size: int = 100) -> int:
+        """
+        Compute embeddings for all nodes that don't have one.
+
+        Useful for initial population or migration.
+
+        Args:
+            batch_size: Process nodes in batches for efficiency
+
+        Returns:
+            Number of embeddings computed
+        """
+        try:
+            from core.embeddings import compute_embeddings_batch
+        except ImportError:
+            return 0
+
+        nodes_needing_embeddings = [
+            n for n in self._graph.nodes()
+            if n.embedding is None and n.content
+        ]
+
+        if not nodes_needing_embeddings:
+            return 0
+
+        count = 0
+        for i in range(0, len(nodes_needing_embeddings), batch_size):
+            batch = nodes_needing_embeddings[i:i + batch_size]
+            texts = [n.content for n in batch]
+            embeddings = compute_embeddings_batch(texts)
+
+            for node, embedding in zip(batch, embeddings):
+                if embedding is not None:
+                    node.embedding = embedding
+                    count += 1
+
+        return count
+
+    # =========================================================================
     # TOPOLOGY VALIDATION (Graph-Native Constraints)
     # =========================================================================
 

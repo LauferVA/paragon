@@ -30,6 +30,11 @@ tree-sitter-typescript     # TypeScript/TSX grammar for tree-sitter
 pygmtools>=0.4.0           # Graph matching algorithms (RRWM, etc.)
 
 # -----------------------------------------------------------------------------
+# SEMANTIC EMBEDDINGS (Hybrid Context Assembly)
+# -----------------------------------------------------------------------------
+sentence-transformers>=2.2.0  # Local embedding model (all-MiniLM-L6-v2, 384 dims)
+
+# -----------------------------------------------------------------------------
 # ORCHESTRATION
 # -----------------------------------------------------------------------------
 langgraph>=0.2.0           # LangChain graph orchestration (stable API)

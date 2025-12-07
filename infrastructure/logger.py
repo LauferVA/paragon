@@ -303,10 +303,18 @@ class MutationLogger:
 
     Thread-safe for concurrent logging.
 
+    Correlation ID Support:
+        Set correlation_id to link mutation events with diagnostics logs.
+        Use set_correlation_id() to set for all subsequent events, or
+        pass correlation_id directly to individual logging methods.
+
     Usage:
         logger = MutationLogger()
 
-        # Log events
+        # Set correlation ID from diagnostics
+        logger.set_correlation_id("dx_20250607_123456_abc12345")
+
+        # Log events (automatically include correlation_id)
         logger.log_node_created("node_123", "CODE", "agent_001")
         logger.log_status_changed("node_123", "PENDING", "IN_PROGRESS")
 
@@ -323,6 +331,9 @@ class MutationLogger:
         self._file_logger: Optional[FileLogger] = None
         self._rerun: Optional[RerunIntegration] = None
 
+        # Correlation ID for linking to diagnostics
+        self._correlation_id: Optional[str] = None
+
         # Initialize file logger
         if self.config.enable_file_log and self.config.log_path:
             self._file_logger = FileLogger(self.config.log_path)
@@ -334,6 +345,14 @@ class MutationLogger:
 
         # Event subscribers
         self._subscribers: List[Callable[[MutationEvent], None]] = []
+
+    def set_correlation_id(self, correlation_id: Optional[str]) -> None:
+        """Set the correlation ID for all subsequent events."""
+        self._correlation_id = correlation_id
+
+    def get_correlation_id(self) -> Optional[str]:
+        """Get the current correlation ID."""
+        return self._correlation_id
 
     def _now(self) -> str:
         """Get current UTC timestamp."""
@@ -369,6 +388,7 @@ class MutationLogger:
         node_type: str,
         agent_id: Optional[str] = None,
         agent_role: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ) -> MutationEvent:
         """Log a node creation event."""
         event = MutationEvent(
@@ -379,6 +399,7 @@ class MutationLogger:
             node_type=node_type,
             agent_id=agent_id,
             agent_role=agent_role,
+            correlation_id=correlation_id or self._correlation_id,
         )
         self._emit(event)
         return event
@@ -388,6 +409,7 @@ class MutationLogger:
         node_id: str,
         node_type: str,
         agent_id: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ) -> MutationEvent:
         """Log a node update event."""
         event = MutationEvent(
@@ -397,6 +419,7 @@ class MutationLogger:
             node_id=node_id,
             node_type=node_type,
             agent_id=agent_id,
+            correlation_id=correlation_id or self._correlation_id,
         )
         self._emit(event)
         return event
@@ -424,6 +447,7 @@ class MutationLogger:
         new_status: str,
         agent_id: Optional[str] = None,
         agent_role: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ) -> MutationEvent:
         """Log a status change event."""
         event = MutationEvent(
@@ -435,6 +459,7 @@ class MutationLogger:
             new_status=new_status,
             agent_id=agent_id,
             agent_role=agent_role,
+            correlation_id=correlation_id or self._correlation_id,
         )
         self._emit(event)
         return event
@@ -444,6 +469,7 @@ class MutationLogger:
         source_id: str,
         target_id: str,
         edge_type: str,
+        correlation_id: Optional[str] = None,
     ) -> MutationEvent:
         """Log an edge creation event."""
         event = MutationEvent(
@@ -453,6 +479,7 @@ class MutationLogger:
             source_id=source_id,
             target_id=target_id,
             edge_type=edge_type,
+            correlation_id=correlation_id or self._correlation_id,
         )
         self._emit(event)
         return event

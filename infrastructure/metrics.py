@@ -603,6 +603,85 @@ class MetricsCollector:
         self._metrics.clear()
         self._in_progress.clear()
 
+    # =========================================================================
+    # MUTATION LOGGER INTEGRATION
+    # =========================================================================
+
+    def sync_from_mutation_logger(self, mutation_logger=None) -> int:
+        """
+        Sync metrics from MutationLogger events.
+
+        This implements the layered approach:
+        - MutationLogger handles the write path (event logging)
+        - MetricsCollector handles the read path (querying/aggregation)
+
+        Args:
+            mutation_logger: MutationLogger instance (uses global if None)
+
+        Returns:
+            Number of events processed
+        """
+        try:
+            if mutation_logger is None:
+                from infrastructure.logger import get_logger
+                mutation_logger = get_logger()
+
+            events = mutation_logger.get_recent_events(n=10000)
+            processed = 0
+
+            for event in events:
+                if event.mutation_type == "node_created":
+                    if event.node_id not in self._metrics:
+                        self.record_node_created(
+                            node_id=event.node_id,
+                            node_type=event.node_type or "unknown",
+                            created_by=event.agent_id,
+                        )
+                        processed += 1
+
+                elif event.mutation_type == "status_changed":
+                    if event.node_id in self._metrics:
+                        metric = self._metrics[event.node_id]
+                        metric.status = event.new_status or metric.status
+                        processed += 1
+
+            return processed
+        except Exception:
+            return 0
+
+    def subscribe_to_mutation_logger(self, mutation_logger=None) -> None:
+        """
+        Subscribe to MutationLogger for real-time metric updates.
+
+        This allows MetricsCollector to automatically record metrics
+        as mutations happen, without manual sync.
+
+        Args:
+            mutation_logger: MutationLogger instance (uses global if None)
+        """
+        try:
+            if mutation_logger is None:
+                from infrastructure.logger import get_logger
+                mutation_logger = get_logger()
+
+            def on_mutation(event):
+                """Callback for mutation events."""
+                if event.mutation_type == "node_created":
+                    if event.node_id not in self._metrics:
+                        self.record_node_created(
+                            node_id=event.node_id,
+                            node_type=event.node_type or "unknown",
+                            created_by=event.agent_id,
+                        )
+                elif event.mutation_type == "status_changed":
+                    if event.node_id in self._metrics:
+                        metric = self._metrics[event.node_id]
+                        metric.status = event.new_status or metric.status
+
+            mutation_logger.subscribe(on_mutation)
+        except Exception:
+            pass  # Graceful degradation if logger not available
+
 
 # =============================================================================
 # CONVENIENCE FUNCTIONS
