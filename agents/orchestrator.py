@@ -123,6 +123,20 @@ try:
 except ImportError:
     TRAINING_STORE_AVAILABLE = False
 
+# RerunLogger for visual temporal debugging (Time Machine)
+try:
+    from infrastructure.rerun_logger import RerunLogger, create_logger as create_rerun_logger
+    RERUN_LOGGER_AVAILABLE = True
+except ImportError:
+    RERUN_LOGGER_AVAILABLE = False
+
+# Environment detection for system capability logging
+try:
+    from infrastructure.environment import EnvironmentDetector, EnvironmentReport
+    ENVIRONMENT_AVAILABLE = True
+except ImportError:
+    ENVIRONMENT_AVAILABLE = False
+
 # Optional LLM integration (graceful degradation if not configured)
 try:
     from core.llm import get_llm, StructuredLLM
@@ -1679,6 +1693,34 @@ class TDDOrchestrator:
                     )
             except Exception as e:
                 logger.debug(f"Analytics health check failed: {e}")
+
+        # RerunLogger: Initialize Time Machine for this session
+        rerun_logger = None
+        if RERUN_LOGGER_AVAILABLE:
+            try:
+                rerun_logger = create_rerun_logger(session_id=effective_session_id)
+                if rerun_logger and rerun_logger.recording_path:
+                    logger.info(f"Time Machine recording to: {rerun_logger.recording_path}")
+            except Exception as e:
+                logger.debug(f"RerunLogger initialization failed: {e}")
+
+        # Environment: Log system capabilities at run start
+        if ENVIRONMENT_AVAILABLE:
+            try:
+                detector = EnvironmentDetector()
+                env_report = detector.detect()
+                logger.info(
+                    f"Environment: {env_report.os_name}, Python {env_report.python_version}, "
+                    f"RAM={env_report.ram_gb:.1f}GB, GPU={'Yes' if env_report.gpu_available else 'No'}"
+                )
+                # Log to RerunLogger if available
+                if rerun_logger:
+                    rerun_logger.log_thought(
+                        "system",
+                        f"Environment: {env_report.os_name}, RAM={env_report.ram_gb:.1f}GB, GPU={env_report.gpu_available}"
+                    )
+            except Exception as e:
+                logger.debug(f"Environment detection failed: {e}")
 
         initial_state: GraphState = {
             "session_id": effective_session_id,

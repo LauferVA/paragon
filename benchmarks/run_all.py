@@ -198,12 +198,45 @@ def run_protocol_epsilon_wrapper() -> ProtocolResult:
         )
 
 
+def run_protocol_zeta_wrapper() -> ProtocolResult:
+    """Protocol Zeta: Human-in-the-Loop & Research Phase."""
+    start = time.perf_counter()
+    try:
+        from benchmarks.protocol_zeta import run_protocol_zeta
+        # run_protocol_zeta returns dict with 'passed', 'total', 'errors'
+        result = run_protocol_zeta()
+        duration = time.perf_counter() - start
+
+        passed = result.get("passed", 0)
+        total = result.get("total", 0)
+        status = ProtocolStatus.PASSED if passed == total else ProtocolStatus.FAILED
+
+        return ProtocolResult(
+            name="Zeta (Research)",
+            status=status,
+            duration_seconds=duration,
+            tests_passed=passed,
+            tests_total=total,
+        )
+    except Exception as e:
+        duration = time.perf_counter() - start
+        return ProtocolResult(
+            name="Zeta (Research)",
+            status=ProtocolStatus.ERROR,
+            duration_seconds=duration,
+            tests_passed=0,
+            tests_total=0,
+            error_message=str(e),
+        )
+
+
 PROTOCOL_MAP = {
     "alpha": run_protocol_alpha_wrapper,
     "beta": run_protocol_beta_wrapper,
     "gamma": run_protocol_gamma_wrapper,
     "delta": run_protocol_delta_wrapper,
     "epsilon": run_protocol_epsilon_wrapper,
+    "zeta": run_protocol_zeta_wrapper,
 }
 
 
