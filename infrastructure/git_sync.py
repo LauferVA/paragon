@@ -50,9 +50,39 @@ class GitSyncConfig(msgspec.Struct, kw_only=True, frozen=True):
     author_email: str = "paragon@localhost"  # Git author email
 
 
-def load_git_config() -> GitSyncConfig:
+def load_git_config_from_graph(db) -> Optional[GitSyncConfig]:
     """
-    Load git sync configuration from paragon.toml.
+    Load git sync configuration from graph (graph-native approach).
+
+    Wave 6 Refactor: Config lives in graph, not files.
+
+    Args:
+        db: ParagonDB instance with CONFIG nodes
+
+    Returns:
+        GitSyncConfig or None if not available
+    """
+    try:
+        from infrastructure.config_graph import get_config
+        git_cfg = get_config(db, "git")
+        if git_cfg:
+            return GitSyncConfig(
+                enabled=git_cfg.get("enabled", True),
+                repo_path=git_cfg.get("repo_path", "."),
+                auto_commit=git_cfg.get("auto_commit", True),
+                auto_push=git_cfg.get("auto_push", False),
+                commit_prefix=git_cfg.get("commit_prefix", ""),
+                author_name=git_cfg.get("author_name", "Paragon"),
+                author_email=git_cfg.get("author_email", "paragon@localhost"),
+            )
+    except Exception:
+        pass
+    return None
+
+
+def load_git_config_from_toml() -> GitSyncConfig:
+    """
+    Load git sync configuration from paragon.toml (legacy fallback).
 
     Returns:
         GitSyncConfig with settings
@@ -75,8 +105,30 @@ def load_git_config() -> GitSyncConfig:
             author_email=git_cfg.get("author_email", "paragon@localhost"),
         )
     except Exception as e:
-        warnings.warn(f"Failed to load git config, using defaults: {e}")
+        warnings.warn(f"Failed to load git config from TOML: {e}")
         return GitSyncConfig()
+
+
+def load_git_config(db=None) -> GitSyncConfig:
+    """
+    Load git sync configuration with graph-native priority.
+
+    Resolution order: Graph -> TOML -> Defaults
+
+    Args:
+        db: Optional ParagonDB instance for graph-native config
+
+    Returns:
+        GitSyncConfig with settings
+    """
+    # Try graph-native config first
+    if db is not None:
+        graph_config = load_git_config_from_graph(db)
+        if graph_config:
+            return graph_config
+
+    # Fall back to TOML
+    return load_git_config_from_toml()
 
 
 # =============================================================================

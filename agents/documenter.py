@@ -51,9 +51,37 @@ class DocumenterConfig(msgspec.Struct, kw_only=True, frozen=True):
     include_pending_nodes: bool = False  # Whether to document pending nodes
 
 
-def load_documenter_config() -> DocumenterConfig:
+def load_documenter_config_from_graph(db) -> DocumenterConfig:
     """
-    Load documenter configuration from paragon.toml.
+    Load documenter configuration from graph (graph-native approach).
+
+    Wave 6 Refactor: Config lives in graph, not files.
+
+    Args:
+        db: ParagonDB instance with CONFIG nodes
+
+    Returns:
+        DocumenterConfig with settings from graph
+    """
+    try:
+        from infrastructure.config_graph import get_config
+        doc_cfg = get_config(db, "documenter")
+        if doc_cfg:
+            return DocumenterConfig(
+                readme_path=doc_cfg.get("readme_path", "README.md"),
+                changelog_path=doc_cfg.get("changelog_path", "CHANGELOG.md"),
+                wiki_path=doc_cfg.get("wiki_path", "docs/wiki"),
+                auto_generate=doc_cfg.get("auto_generate", True),
+                include_pending_nodes=doc_cfg.get("include_pending_nodes", False),
+            )
+    except Exception:
+        pass  # Fall through to TOML fallback
+    return None
+
+
+def load_documenter_config_from_toml() -> DocumenterConfig:
+    """
+    Load documenter configuration from paragon.toml (legacy fallback).
 
     Returns:
         DocumenterConfig with settings
@@ -74,8 +102,30 @@ def load_documenter_config() -> DocumenterConfig:
             include_pending_nodes=doc_cfg.get("include_pending_nodes", False),
         )
     except Exception as e:
-        warnings.warn(f"Failed to load documenter config, using defaults: {e}")
+        warnings.warn(f"Failed to load documenter config from TOML: {e}")
         return DocumenterConfig()
+
+
+def load_documenter_config(db=None) -> DocumenterConfig:
+    """
+    Load documenter configuration with graph-native priority.
+
+    Resolution order: Graph -> TOML -> Defaults
+
+    Args:
+        db: Optional ParagonDB instance for graph-native config
+
+    Returns:
+        DocumenterConfig with settings
+    """
+    # Try graph-native config first
+    if db is not None:
+        graph_config = load_documenter_config_from_graph(db)
+        if graph_config:
+            return graph_config
+
+    # Fall back to TOML
+    return load_documenter_config_from_toml()
 
 
 # =============================================================================
@@ -177,10 +227,11 @@ class Documenter:
 
         Args:
             db: ParagonDB instance
-            config: Optional DocumenterConfig
+            config: Optional DocumenterConfig (if None, loads from graph then TOML)
         """
         self.db = db
-        self.config = config or load_documenter_config()
+        # Graph-native: try to load config from graph first
+        self.config = config or load_documenter_config(db=db)
 
     def generate_readme(self) -> bool:
         """

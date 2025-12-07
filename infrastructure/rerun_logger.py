@@ -49,9 +49,31 @@ except ImportError:
 # CONFIGURATION LOADER
 # =============================================================================
 
-def load_observability_config() -> Dict[str, Any]:
+def load_observability_config_from_graph(db) -> Optional[Dict[str, Any]]:
     """
-    Load observability configuration from paragon.toml.
+    Load observability configuration from graph (graph-native approach).
+
+    Wave 6 Refactor: Config lives in graph, not files.
+
+    Args:
+        db: ParagonDB instance with CONFIG nodes
+
+    Returns:
+        Dict with config or None if not available
+    """
+    try:
+        from infrastructure.config_graph import get_config
+        config = get_config(db, "observability")
+        if config:
+            return config
+    except Exception:
+        pass
+    return None
+
+
+def load_observability_config_from_toml() -> Dict[str, Any]:
+    """
+    Load observability configuration from paragon.toml (legacy fallback).
 
     Returns:
         Dict with keys: log_dir, session_pattern, rerun_enabled
@@ -69,12 +91,34 @@ def load_observability_config() -> Dict[str, Any]:
             "rerun_enabled": True,
         })
     except Exception as e:
-        warnings.warn(f"Failed to load config, using defaults: {e}")
+        warnings.warn(f"Failed to load config from TOML: {e}")
         return {
             "log_dir": "./data/sessions",
             "session_pattern": "{timestamp}_{session_id}.rrd",
             "rerun_enabled": True,
         }
+
+
+def load_observability_config(db=None) -> Dict[str, Any]:
+    """
+    Load observability configuration with graph-native priority.
+
+    Resolution order: Graph -> TOML -> Defaults
+
+    Args:
+        db: Optional ParagonDB instance for graph-native config
+
+    Returns:
+        Dict with observability settings
+    """
+    # Try graph-native config first
+    if db is not None:
+        graph_config = load_observability_config_from_graph(db)
+        if graph_config:
+            return graph_config
+
+    # Fall back to TOML
+    return load_observability_config_from_toml()
 
 
 # =============================================================================
