@@ -230,6 +230,38 @@ def run_protocol_zeta_wrapper() -> ProtocolResult:
         )
 
 
+def run_protocol_omega_wrapper() -> ProtocolResult:
+    """Protocol Omega: Full System Stress Test (via Harness)."""
+    start = time.perf_counter()
+    try:
+        from benchmarks.harness import run_benchmark
+        # Run smoke tier as default for quick validation
+        result = run_benchmark(tier="smoke", interactive=False, visualize=False)
+        duration = time.perf_counter() - start
+
+        passed = result.tasks_passed
+        total = result.tasks_attempted
+        status = ProtocolStatus.PASSED if passed == total else ProtocolStatus.FAILED
+
+        return ProtocolResult(
+            name="Omega (Harness)",
+            status=status,
+            duration_seconds=duration,
+            tests_passed=passed,
+            tests_total=total,
+        )
+    except Exception as e:
+        duration = time.perf_counter() - start
+        return ProtocolResult(
+            name="Omega (Harness)",
+            status=ProtocolStatus.ERROR,
+            duration_seconds=duration,
+            tests_passed=0,
+            tests_total=0,
+            error_message=str(e),
+        )
+
+
 PROTOCOL_MAP = {
     "alpha": run_protocol_alpha_wrapper,
     "beta": run_protocol_beta_wrapper,
@@ -237,6 +269,7 @@ PROTOCOL_MAP = {
     "delta": run_protocol_delta_wrapper,
     "epsilon": run_protocol_epsilon_wrapper,
     "zeta": run_protocol_zeta_wrapper,
+    "omega": run_protocol_omega_wrapper,
 }
 
 

@@ -1318,6 +1318,22 @@ def passed_node(state: GraphState) -> Dict[str, Any]:
         except Exception as e:
             logger.debug(f"Documentation generation failed: {e}")
 
+    # Learning: Record successful outcome for adaptive model selection
+    try:
+        from core.llm import _learning_manager, _learning_available
+        if _learning_available and _learning_manager is not None:
+            _learning_manager.record_outcome(
+                session_id=session_id,
+                success=True,
+                stats={
+                    "total_iterations": iteration + 1,
+                    "teleology_valid": teleology_valid,
+                },
+            )
+            logger.debug(f"Learning: Recorded successful outcome for session {session_id}")
+    except Exception as e:
+        logger.debug(f"Learning feedback failed: {e}")
+
     return {
         "phase": CyclePhase.PASSED.value,
         "messages": messages,
@@ -1386,6 +1402,36 @@ def failed_node(state: GraphState) -> Dict[str, Any]:
                 })
         except Exception as e:
             logger.debug(f"Attribution analysis failed: {e}")
+
+    # Learning: Record failed outcome for adaptive model selection
+    try:
+        from core.llm import _learning_manager, _learning_available
+        from infrastructure.learning import FailureCode, CyclePhase as LearningPhase
+        if _learning_available and _learning_manager is not None:
+            # Determine failure code from attribution if available
+            failure_code = None
+            failure_phase = None
+            if attribution_results:
+                first_attr = attribution_results[0]
+                try:
+                    failure_code = FailureCode(first_attr.get("failure_code", "F5"))
+                    failure_phase = LearningPhase(first_attr.get("attributed_phase", "BUILD"))
+                except (ValueError, KeyError):
+                    pass
+
+            _learning_manager.record_outcome(
+                session_id=session_id,
+                success=False,
+                failure_code=failure_code,
+                failure_phase=failure_phase,
+                stats={
+                    "error_count": len(errors),
+                    "attribution_count": len(attribution_results),
+                },
+            )
+            logger.debug(f"Learning: Recorded failed outcome for session {session_id}")
+    except Exception as e:
+        logger.debug(f"Learning feedback failed: {e}")
 
     return {
         "phase": CyclePhase.FAILED.value,
