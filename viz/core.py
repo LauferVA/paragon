@@ -118,6 +118,11 @@ class VizNode(msgspec.Struct, kw_only=True):
     is_root: bool = False               # True if no predecessors
     is_leaf: bool = False               # True if no successors
 
+    # Dialogue-to-graph correspondence metadata
+    message_ids: List[str] = msgspec.field(default_factory=list)  # Messages referencing this node
+    dialogue_references: List[str] = msgspec.field(default_factory=list)  # Turn IDs mentioning this node
+    hover_info: Optional[Dict[str, Any]] = None  # Rich hover metadata
+
     @classmethod
     def from_node_data(
         cls,
@@ -128,8 +133,10 @@ class VizNode(msgspec.Struct, kw_only=True):
         is_leaf: bool = False,
         x: Optional[float] = None,
         y: Optional[float] = None,
+        centrality_degree: Optional[int] = None,  # Total degree for sizing
+        is_hotspot: bool = False,       # Mark high-degree nodes
     ) -> "VizNode":
-        """Create VizNode from NodeData."""
+        """Create VizNode from NodeData with optional analytics."""
         # Determine color based on mode
         if color_mode == "status":
             color = STATUS_COLORS.get(node.status, STATUS_COLORS["default"])
@@ -141,12 +148,31 @@ class VizNode(msgspec.Struct, kw_only=True):
         if hasattr(node, 'data') and node.data.get('name'):
             label = node.data['name'][:20]
 
+        # Compute node size based on centrality (analytics integration)
+        size = 1.0
+        if centrality_degree is not None:
+            # Scale size based on degree: 0.5 (min) to 3.0 (max)
+            # Hotspots get even larger (up to 5.0)
+            base_size = 0.5 + (min(centrality_degree, 20) / 20.0) * 2.5
+            size = base_size * 2.0 if is_hotspot else base_size
+
+        # Extract dialogue metadata from node.data if present
+        message_ids = []
+        dialogue_references = []
+        hover_info = None
+
+        if hasattr(node, 'data') and isinstance(node.data, dict):
+            message_ids = node.data.get('message_ids', [])
+            dialogue_references = node.data.get('referenced_in_turns', [])
+            hover_info = node.data.get('hover_metadata')
+
         return cls(
             id=node.id,
             type=node.type,
             status=node.status,
             label=label,
             color=color,
+            size=size,
             created_by=node.created_by,
             created_at=node.created_at,
             teleology_status=getattr(node, 'teleology_status', 'unchecked'),
@@ -155,6 +181,9 @@ class VizNode(msgspec.Struct, kw_only=True):
             is_leaf=is_leaf,
             x=x,
             y=y,
+            message_ids=message_ids,
+            dialogue_references=dialogue_references,
+            hover_info=hover_info,
         )
 
 
@@ -482,7 +511,20 @@ def create_snapshot_from_db(
     root_ids = {n.id for n in db.get_root_nodes()}
     leaf_ids = {n.id for n in db.get_leaf_nodes()}
 
-    # Convert to VizNodes with position hints
+    # Compute analytics for node sizing (hotspots get larger nodes)
+    try:
+        from core.analytics import compute_degree_centrality, find_hotspots
+        centrality_reports = compute_degree_centrality(db)
+        hotspot_ids = set(find_hotspots(db, threshold_percentile=90))
+
+        # Build centrality map for node sizing
+        centrality_map = {r.node_id: r.total_degree for r in centrality_reports}
+    except Exception:
+        # Graceful degradation if analytics unavailable
+        centrality_map = {}
+        hotspot_ids = set()
+
+    # Convert to VizNodes with position hints and analytics-based sizing
     viz_nodes = []
     layer_counts = {}  # Track node count per layer for positioning
     for node in all_nodes:
@@ -497,6 +539,10 @@ def create_snapshot_from_db(
         y_pos = float(layer_idx * 100)  # 100 units between layers
         x_pos = float(node_position_in_layer * 80)  # 80 units between nodes
 
+        # Get analytics data for this node
+        centrality_degree = centrality_map.get(node.id)
+        is_hotspot = node.id in hotspot_ids
+
         viz_node = VizNode.from_node_data(
             node,
             color_mode=color_mode,
@@ -505,6 +551,8 @@ def create_snapshot_from_db(
             is_leaf=node.id in leaf_ids,
             x=x_pos,
             y=y_pos,
+            centrality_degree=centrality_degree,
+            is_hotspot=is_hotspot,
         )
         viz_nodes.append(viz_node)
 

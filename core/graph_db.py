@@ -40,6 +40,22 @@ from core.ontology import (
     get_constraint, get_required_edges, validate_status_for_type,
 )
 
+# Infrastructure integrations (graceful degradation if not available)
+try:
+    from infrastructure.logger import get_logger as get_mutation_logger
+    from infrastructure.metrics import get_collector as get_metrics_collector
+    OBSERVABILITY_AVAILABLE = True
+except ImportError:
+    OBSERVABILITY_AVAILABLE = False
+
+# Event bus for real-time notifications (graceful degradation)
+try:
+    from infrastructure.event_bus import get_event_bus, GraphEvent, EventType
+    import time as _event_time
+    EVENT_BUS_AVAILABLE = True
+except ImportError:
+    EVENT_BUS_AVAILABLE = False
+
 
 # =============================================================================
 # CUSTOM EXCEPTIONS
@@ -132,6 +148,9 @@ class ParagonDB:
         # Edge tracking for fast lookup
         self._edge_map: Dict[Tuple[str, str], int] = {}  # (src_id, tgt_id) -> edge_idx
 
+        # Event bus for real-time notifications
+        self._event_bus = get_event_bus() if EVENT_BUS_AVAILABLE else None
+
     # =========================================================================
     # PROPERTIES
     # =========================================================================
@@ -184,6 +203,44 @@ class ParagonDB:
         # Update both maps
         self._node_map[node_id] = idx
         self._inv_map[idx] = node_id
+
+        # Log mutation event (if observability available)
+        if OBSERVABILITY_AVAILABLE:
+            try:
+                logger = get_mutation_logger()
+                logger.log_node_created(
+                    node_id=node_id,
+                    node_type=data.node_type.value,
+                    agent_id=data.payload.created_by if hasattr(data.payload, 'created_by') else None,
+                )
+
+                # Record metrics
+                metrics = get_metrics_collector()
+                metrics.record_node_created(
+                    node_id=node_id,
+                    node_type=data.node_type.value,
+                    created_by=data.payload.created_by if hasattr(data.payload, 'created_by') else "system",
+                )
+            except Exception:
+                pass  # Don't let observability break graph operations
+
+        # Publish event for real-time notifications
+        if self._event_bus:
+            try:
+                self._event_bus.publish(GraphEvent(
+                    type=EventType.NODE_CREATED,
+                    payload={
+                        "node_id": node_id,
+                        "node_type": data.node_type.value,
+                        "status": data.status.value if hasattr(data.status, 'value') else data.status,
+                        "content": data.content[:100] if data.content else "",  # Truncate for performance
+                        "created_by": data.payload.created_by if hasattr(data.payload, 'created_by') else "system",
+                    },
+                    timestamp=_event_time.time(),
+                    source="graph_db"
+                ))
+            except Exception:
+                pass  # Don't let event bus break graph operations
 
         return idx
 
@@ -288,6 +345,23 @@ class ParagonDB:
         idx = self._node_map[node_id]
         self._graph[idx] = data
 
+        # Publish event for real-time notifications
+        if self._event_bus:
+            try:
+                self._event_bus.publish(GraphEvent(
+                    type=EventType.NODE_UPDATED,
+                    payload={
+                        "node_id": node_id,
+                        "node_type": data.node_type.value,
+                        "status": data.status.value if hasattr(data.status, 'value') else data.status,
+                        "content": data.content[:100] if data.content else "",
+                    },
+                    timestamp=_event_time.time(),
+                    source="graph_db"
+                ))
+            except Exception:
+                pass  # Don't let event bus break graph operations
+
     def remove_node(self, node_id: str) -> NodeData:
         """
         Remove a node and all its edges.
@@ -325,6 +399,21 @@ class ParagonDB:
         # Clean up maps
         del self._node_map[node_id]
         del self._inv_map[idx]
+
+        # Publish event for real-time notifications
+        if self._event_bus:
+            try:
+                self._event_bus.publish(GraphEvent(
+                    type=EventType.NODE_DELETED,
+                    payload={
+                        "node_id": node_id,
+                        "node_type": data.node_type.value,
+                    },
+                    timestamp=_event_time.time(),
+                    source="graph_db"
+                ))
+            except Exception:
+                pass  # Don't let event bus break graph operations
 
         return data
 
@@ -406,6 +495,23 @@ class ParagonDB:
 
         # Track in edge map
         self._edge_map[(source_id, target_id)] = edge_idx
+
+        # Publish event for real-time notifications
+        if self._event_bus:
+            try:
+                self._event_bus.publish(GraphEvent(
+                    type=EventType.EDGE_CREATED,
+                    payload={
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "edge_type": edge.type.value if hasattr(edge.type, 'value') else edge.type,
+                        "weight": edge.weight,
+                    },
+                    timestamp=_event_time.time(),
+                    source="graph_db"
+                ))
+            except Exception:
+                pass  # Don't let event bus break graph operations
 
         return edge_idx
 
@@ -489,6 +595,22 @@ class ParagonDB:
 
         # Clean up map
         del self._edge_map[key]
+
+        # Publish event for real-time notifications
+        if self._event_bus:
+            try:
+                self._event_bus.publish(GraphEvent(
+                    type=EventType.EDGE_DELETED,
+                    payload={
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "edge_type": edge_data.type.value if hasattr(edge_data.type, 'value') else edge_data.type,
+                    },
+                    timestamp=_event_time.time(),
+                    source="graph_db"
+                ))
+            except Exception:
+                pass  # Don't let event bus break graph operations
 
         return edge_data
 
@@ -804,6 +926,274 @@ class ParagonDB:
     def find_pending_nodes(self) -> List[NodeData]:
         """Find all nodes with PENDING status."""
         return self.get_nodes_by_status(NodeStatus.PENDING.value)
+
+    # =========================================================================
+    # MESSAGE-TO-NODE MAPPING (Dialogue-to-Graph Correspondence)
+    # =========================================================================
+
+    def link_message_to_node(
+        self,
+        message_id: str,
+        node_id: str,
+        edge_type: str = EdgeType.REFERENCES.value,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """
+        Create a link from a message/dialogue turn to a node.
+
+        This establishes the dialogue-to-graph correspondence, allowing UI
+        to show which messages reference which nodes and vice versa.
+
+        Args:
+            message_id: ID of the MESSAGE node or dialogue turn ID
+            node_id: ID of the node being referenced
+            edge_type: Type of edge (REFERENCES or DEFINES_DIALOGUE)
+            metadata: Optional metadata for the edge (e.g., turn context)
+
+        Returns:
+            Edge index
+
+        Raises:
+            NodeNotFoundError: If either node doesn't exist
+
+        Example:
+            # When a dialogue turn references a node
+            db.link_message_to_node("turn_123", "node_456", EdgeType.REFERENCES.value)
+
+            # When a dialogue turn creates/defines a node
+            db.link_message_to_node("turn_123", "node_456", EdgeType.DEFINES_DIALOGUE.value)
+        """
+        edge_metadata = metadata or {}
+        edge = EdgeData.create(
+            source_id=message_id,
+            target_id=node_id,
+            type=edge_type,
+            metadata=edge_metadata,
+        )
+        return self.add_edge(edge, check_cycle=False)  # Messages may not be in DAG
+
+    def get_messages_for_node(self, node_id: str) -> List[NodeData]:
+        """
+        Get all MESSAGE nodes that reference a given node.
+
+        This answers: "Which dialogue turns/messages mention this node?"
+
+        Args:
+            node_id: The node to query
+
+        Returns:
+            List of MESSAGE nodes with REFERENCES or DEFINES_DIALOGUE edges to this node
+
+        Example:
+            messages = db.get_messages_for_node("code_node_123")
+            for msg in messages:
+                print(f"Turn {msg.data.get('turn_number')}: {msg.content}")
+        """
+        if node_id not in self._node_map:
+            return []
+
+        idx = self._node_map[node_id]
+        message_nodes = []
+
+        # Find all predecessors connected via REFERENCES or DEFINES_DIALOGUE
+        for pred_idx in self._graph.predecessor_indices(idx):
+            edge_data = self._graph.get_edge_data(pred_idx, idx)
+            if edge_data and edge_data.type in (
+                EdgeType.REFERENCES.value,
+                EdgeType.DEFINES_DIALOGUE.value,
+            ):
+                pred_node = self._graph[pred_idx]
+                # Only include MESSAGE nodes
+                if pred_node.type == NodeType.MESSAGE.value:
+                    message_nodes.append(pred_node)
+
+        return message_nodes
+
+    def get_nodes_from_message(self, message_id: str) -> List[NodeData]:
+        """
+        Get all nodes referenced by a message/dialogue turn.
+
+        This answers: "Which nodes were discussed in this dialogue turn?"
+
+        Args:
+            message_id: The MESSAGE node ID or dialogue turn ID
+
+        Returns:
+            List of nodes referenced by this message
+
+        Example:
+            nodes = db.get_nodes_from_message("turn_5")
+            for node in nodes:
+                print(f"Referenced {node.type}: {node.id}")
+        """
+        if message_id not in self._node_map:
+            return []
+
+        idx = self._node_map[message_id]
+        referenced_nodes = []
+
+        # Find all successors connected via REFERENCES or DEFINES_DIALOGUE
+        for succ_idx in self._graph.successor_indices(idx):
+            edge_data = self._graph.get_edge_data(idx, succ_idx)
+            if edge_data and edge_data.type in (
+                EdgeType.REFERENCES.value,
+                EdgeType.DEFINES_DIALOGUE.value,
+            ):
+                succ_node = self._graph[succ_idx]
+                referenced_nodes.append(succ_node)
+
+        return referenced_nodes
+
+    def update_node_dialogue_metadata(
+        self,
+        node_id: str,
+        dialogue_turn_id: Optional[str] = None,
+        message_ids: Optional[List[str]] = None,
+        definition_turn: Optional[str] = None,
+        referenced_in_turns: Optional[List[str]] = None,
+        hover_metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Update the dialogue-related metadata in a node's data dictionary.
+
+        This is a convenience method for updating the structured fields
+        documented in NodeData.data.
+
+        Args:
+            node_id: Node to update
+            dialogue_turn_id: ID of the turn that defined this node
+            message_ids: List of message IDs referencing this node
+            definition_turn: Turn ID when first defined
+            referenced_in_turns: List of turn IDs that mention this node
+            hover_metadata: UI hover display metadata
+
+        Raises:
+            NodeNotFoundError: If node doesn't exist
+
+        Example:
+            db.update_node_dialogue_metadata(
+                node_id="spec_123",
+                definition_turn="turn_3",
+                referenced_in_turns=["turn_3", "turn_5", "turn_7"],
+                hover_metadata={
+                    "phase": "planning",
+                    "created_by": "ARCHITECT",
+                    "status": "VERIFIED",
+                    "key_findings": ["Must handle edge case X"]
+                }
+            )
+        """
+        if node_id not in self._node_map:
+            raise NodeNotFoundError(node_id)
+
+        node = self.get_node(node_id)
+
+        # Update only the provided fields
+        if dialogue_turn_id is not None:
+            node.data["dialogue_turn_id"] = dialogue_turn_id
+
+        if message_ids is not None:
+            node.data["message_ids"] = message_ids
+
+        if definition_turn is not None:
+            node.data["definition_turn"] = definition_turn
+
+        if referenced_in_turns is not None:
+            # Merge with existing if present
+            existing = node.data.get("referenced_in_turns", [])
+            # Use set to deduplicate, then convert back to list
+            merged = list(set(existing + referenced_in_turns))
+            node.data["referenced_in_turns"] = merged
+
+        if hover_metadata is not None:
+            # Merge with existing hover_metadata if present
+            existing_hover = node.data.get("hover_metadata", {})
+            existing_hover.update(hover_metadata)
+            node.data["hover_metadata"] = existing_hover
+
+        # Touch the node to update timestamps
+        node.touch()
+
+        # Update in graph
+        self.update_node(node_id, node)
+
+    def get_node_hover_metadata(self, node_id: str) -> Dict[str, Any]:
+        """
+        Get the hover metadata for a node, computing it if not already present.
+
+        This is useful for UI tooltips/hovers, showing context about a node
+        without requiring the full node data.
+
+        Args:
+            node_id: Node to get hover data for
+
+        Returns:
+            Dictionary with hover metadata, or empty dict if node not found
+
+        Example:
+            hover = db.get_node_hover_metadata("code_123")
+            # Returns: {
+            #   "phase": "testing",
+            #   "created_by": "BUILDER",
+            #   "status": "TESTED",
+            #   "teleology_status": "justified",
+            #   "related_nodes": ["spec_456", "test_789"]
+            # }
+        """
+        if node_id not in self._node_map:
+            return {}
+
+        node = self.get_node(node_id)
+
+        # Return existing hover metadata if present
+        if "hover_metadata" in node.data:
+            return node.data["hover_metadata"]
+
+        # Otherwise, compute it on the fly
+        related_node_ids = []
+
+        # Get immediate neighbors
+        for pred in self.get_predecessors(node_id):
+            related_node_ids.append(pred.id)
+        for succ in self.get_successors(node_id):
+            related_node_ids.append(succ.id)
+
+        hover_data = {
+            "phase": self._infer_phase_from_node(node),
+            "created_by": node.created_by,
+            "created_at": node.created_at,
+            "status": node.status,
+            "teleology_status": node.teleology_status,
+            "related_nodes": related_node_ids[:10],  # Limit to first 10
+        }
+
+        return hover_data
+
+    def _infer_phase_from_node(self, node: NodeData) -> str:
+        """
+        Infer the current phase from a node's type and status.
+
+        Internal helper for get_node_hover_metadata.
+        """
+        node_type = node.type
+
+        # Map node types to phases
+        if node_type == NodeType.REQ.value:
+            return "requirements"
+        elif node_type == NodeType.RESEARCH.value:
+            return "research"
+        elif node_type in (NodeType.SPEC.value, NodeType.PLAN.value):
+            return "planning"
+        elif node_type == NodeType.CODE.value:
+            if node.status in (NodeStatus.TESTING.value, NodeStatus.TESTED.value):
+                return "testing"
+            return "building"
+        elif node_type in (NodeType.TEST.value, NodeType.TEST_SUITE.value):
+            return "testing"
+        elif node_type == NodeType.DOC.value:
+            return "documentation"
+        else:
+            return "unknown"
 
     # =========================================================================
     # SEMANTIC SIMILARITY (Hybrid Context Assembly - Fuzzy Layer)
@@ -1368,6 +1758,221 @@ class ParagonDB:
             if triggers:
                 ready.append(node)
         return ready
+
+    # =========================================================================
+    # DIALOGUE-TO-GRAPH HIGHLIGHTING (Interactive Visualization)
+    # =========================================================================
+
+    def get_related_nodes(
+        self,
+        node_id: str,
+        mode: Literal["exact", "related", "dependent"] = "exact"
+    ) -> List[str]:
+        """
+        Get nodes related to a given node for highlighting purposes.
+
+        This method supports click-to-highlight features in the UI where
+        clicking a message/node highlights related nodes in the graph.
+
+        Args:
+            node_id: The starting node ID
+            mode: Highlighting mode:
+                - "exact": Just the node itself
+                - "related": Node + immediate dependencies (DEPENDS_ON, IMPLEMENTS edges)
+                - "dependent": Node + all nodes that depend on it (reverse dependencies)
+
+        Returns:
+            List of node IDs to highlight
+
+        Raises:
+            NodeNotFoundError: If node doesn't exist
+
+        Example:
+            # Highlight a node and its dependencies
+            related = db.get_related_nodes("spec_123", mode="related")
+            for node_id in related:
+                highlight_in_ui(node_id)
+        """
+        if node_id not in self._node_map:
+            raise NodeNotFoundError(node_id)
+
+        if mode == "exact":
+            return [node_id]
+
+        result_ids: Set[str] = {node_id}
+        idx = self._node_map[node_id]
+
+        if mode == "related":
+            # Get immediate dependencies via DEPENDS_ON and IMPLEMENTS edges
+            for pred_idx in self._graph.predecessor_indices(idx):
+                edge_data = self._graph.get_edge_data(pred_idx, idx)
+                if edge_data and edge_data.type in (EdgeType.DEPENDS_ON, EdgeType.IMPLEMENTS):
+                    pred_id = self._inv_map[pred_idx]
+                    result_ids.add(pred_id)
+
+            # Also include direct successors via same edge types
+            for succ_idx in self._graph.successor_indices(idx):
+                edge_data = self._graph.get_edge_data(idx, succ_idx)
+                if edge_data and edge_data.type in (EdgeType.DEPENDS_ON, EdgeType.IMPLEMENTS):
+                    succ_id = self._inv_map[succ_idx]
+                    result_ids.add(succ_id)
+
+        elif mode == "dependent":
+            # Get all nodes that depend on this node (reverse dependencies)
+            # This includes all descendants in the dependency graph
+            desc_indices = rx.descendants(self._graph, idx)
+            for desc_idx in desc_indices:
+                result_ids.add(self._inv_map[desc_idx])
+
+            # Also include immediate dependents
+            for succ_idx in self._graph.successor_indices(idx):
+                result_ids.add(self._inv_map[succ_idx])
+
+        return sorted(result_ids)
+
+    def get_reverse_connections(self, node_id: str) -> Dict[str, Any]:
+        """
+        Find all MESSAGE/DIALOGUE nodes and edges that reference this node.
+
+        This enables hover-to-show-references features where hovering a node
+        displays which messages reference it and what edges point to it.
+
+        Args:
+            node_id: The node to find connections for
+
+        Returns:
+            Dict with:
+                - referenced_in_dialogue: List of DIALOGUE/MESSAGE node IDs
+                - referenced_in_messages: List of MESSAGE nodes that reference this node
+                - incoming_edges: List of edge info dicts with source, target, type
+                - outgoing_edges: List of edge info dicts
+                - definition_location: Optional file/location where node was defined
+                - last_modified_by: Who last modified this node
+                - last_modified_at: When it was last modified
+
+        Raises:
+            NodeNotFoundError: If node doesn't exist
+
+        Example:
+            connections = db.get_reverse_connections("code_abc")
+            for msg_id in connections["referenced_in_messages"]:
+                show_message_reference(msg_id)
+        """
+        if node_id not in self._node_map:
+            raise NodeNotFoundError(node_id)
+
+        node = self.get_node(node_id)
+        idx = self._node_map[node_id]
+
+        # Find MESSAGE and THREAD nodes that reference this node via REFERENCES edges
+        referenced_in_dialogue = []
+        referenced_in_messages = []
+
+        for other_idx in self._graph.node_indices():
+            other_node = self._graph[other_idx]
+
+            # Check if this is a MESSAGE or THREAD node
+            if other_node.type in (NodeType.MESSAGE.value, NodeType.THREAD.value):
+                # Check if there's a REFERENCES edge from the message to our node
+                if self._graph.has_edge(other_idx, idx):
+                    edge_data = self._graph.get_edge_data(other_idx, idx)
+                    if edge_data and edge_data.type == EdgeType.REFERENCES:
+                        other_id = self._inv_map[other_idx]
+                        referenced_in_dialogue.append(other_id)
+                        if other_node.type == NodeType.MESSAGE.value:
+                            referenced_in_messages.append(other_id)
+
+        # Get all incoming edges
+        incoming_edges = []
+        for pred_idx in self._graph.predecessor_indices(idx):
+            edge_data = self._graph.get_edge_data(pred_idx, idx)
+            if edge_data:
+                pred_id = self._inv_map[pred_idx]
+                pred_node = self._graph[pred_idx]
+                incoming_edges.append({
+                    "source": pred_id,
+                    "target": node_id,
+                    "type": edge_data.type.value if hasattr(edge_data.type, 'value') else edge_data.type,
+                    "weight": edge_data.weight,
+                    "source_node_type": pred_node.type,
+                })
+
+        # Get all outgoing edges
+        outgoing_edges = []
+        for succ_idx in self._graph.successor_indices(idx):
+            edge_data = self._graph.get_edge_data(idx, succ_idx)
+            if edge_data:
+                succ_id = self._inv_map[succ_idx]
+                succ_node = self._graph[succ_idx]
+                outgoing_edges.append({
+                    "source": node_id,
+                    "target": succ_id,
+                    "type": edge_data.type.value if hasattr(edge_data.type, 'value') else edge_data.type,
+                    "weight": edge_data.weight,
+                    "target_node_type": succ_node.type,
+                })
+
+        # Extract metadata from node
+        definition_location = None
+        if hasattr(node, 'metadata') and node.metadata:
+            extra = node.metadata.extra if hasattr(node.metadata, 'extra') else {}
+            definition_location = extra.get('file_path') or extra.get('location')
+
+        last_modified_by = node.created_by if hasattr(node, 'created_by') else "unknown"
+        last_modified_at = node.created_at if hasattr(node, 'created_at') else ""
+
+        return {
+            "node_id": node_id,
+            "referenced_in_dialogue": referenced_in_dialogue,
+            "referenced_in_messages": referenced_in_messages,
+            "incoming_edges": incoming_edges,
+            "outgoing_edges": outgoing_edges,
+            "definition_location": definition_location,
+            "last_modified_by": last_modified_by,
+            "last_modified_at": last_modified_at,
+        }
+
+    def get_nodes_for_message(self, message_id: str) -> List[str]:
+        """
+        Get all nodes referenced by a MESSAGE or DIALOGUE_TURN node.
+
+        This uses REFERENCES edges created by the message-to-node mapping system.
+
+        Args:
+            message_id: The MESSAGE or THREAD node ID
+
+        Returns:
+            List of node IDs referenced by this message
+
+        Raises:
+            NodeNotFoundError: If message node doesn't exist
+
+        Example:
+            # User clicks a message in the dialogue panel
+            nodes = db.get_nodes_for_message("msg_123")
+            highlight_nodes_in_graph(nodes)
+        """
+        if message_id not in self._node_map:
+            raise NodeNotFoundError(message_id)
+
+        message_node = self.get_node(message_id)
+
+        # Verify this is actually a MESSAGE or THREAD node
+        if message_node.type not in (NodeType.MESSAGE.value, NodeType.THREAD.value):
+            # Not a message node, return empty list
+            return []
+
+        idx = self._node_map[message_id]
+        referenced_nodes = []
+
+        # Find all outgoing REFERENCES edges from this message
+        for succ_idx in self._graph.successor_indices(idx):
+            edge_data = self._graph.get_edge_data(idx, succ_idx)
+            if edge_data and edge_data.type == EdgeType.REFERENCES:
+                succ_id = self._inv_map[succ_idx]
+                referenced_nodes.append(succ_id)
+
+        return referenced_nodes
 
     # =========================================================================
     # PERSISTENCE (Polars-Compatible)

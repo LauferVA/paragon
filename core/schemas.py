@@ -183,6 +183,22 @@ class NodeData(msgspec.Struct, kw_only=True, frozen=False):
     # === Structured Data ===
     # Additional structured data beyond the primary content
     # Used for: file paths, function signatures, test results, etc.
+    #
+    # Message-to-Node Mapping Fields (for dialogue-to-graph correspondence):
+    # - dialogue_turn_id: Optional[str] - ID of dialogue turn that defined this node
+    # - message_ids: List[str] - IDs of messages that reference this node
+    # - definition_turn: Optional[str] - Turn ID when this node was first defined
+    # - referenced_in_turns: List[str] - Turn IDs that mention this node
+    # - hover_metadata: Dict[str, Any] - Metadata for UI hover display
+    #   {
+    #     "phase": str - Current phase (research, plan, build, test)
+    #     "created_by": str - Agent or human that created this
+    #     "created_at": str - ISO timestamp
+    #     "status": str - Current node status
+    #     "teleology_status": str - Teleology verification status
+    #     "related_nodes": List[str] - IDs of related nodes
+    #     "key_findings": Optional[List[str]] - Key findings/discoveries
+    #   }
     data: Dict[str, Any] = msgspec.field(default_factory=dict)
 
     # === Governance ===
@@ -272,9 +288,11 @@ class NodeData(msgspec.Struct, kw_only=True, frozen=False):
         created_by: str = "system",
         **kwargs
     ) -> "NodeData":
-        """Factory method to create a new NodeData with generated ID."""
+        """Factory method to create a new NodeData with optional custom ID."""
+        # Use provided id or generate one
+        node_id = kwargs.pop("id", None) or generate_id()
         return cls(
-            id=generate_id(),
+            id=node_id,
             type=type,
             content=content,
             created_by=created_by,

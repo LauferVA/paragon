@@ -53,6 +53,10 @@ class NodeType(str, Enum):
     RESOURCE_POLICY = "RESOURCE_POLICY"  # Resource constraint policies
     SESSION = "SESSION"              # Session context holder
     RATE_LIMIT_EVENT = "RATE_LIMIT_EVENT"  # Rate limit tracking event
+    # Inter-Agent Communication Types
+    MESSAGE = "MESSAGE"              # Inter-agent message
+    THREAD = "THREAD"                # Message thread/conversation
+    NOTIFICATION = "NOTIFICATION"    # Cross-tab notification
 
 
 class EdgeType(str, Enum):
@@ -77,6 +81,13 @@ class EdgeType(str, Enum):
     APPLIES_TO = "APPLIES_TO"        # Scope: CONFIG -> target nodes/types
     RATE_LIMITED_BY = "RATE_LIMITED_BY"  # Rate limit: request -> RATE_LIMIT_EVENT
     SESSION_CONTAINS = "SESSION_CONTAINS"  # Session membership: SESSION -> nodes
+    # Inter-Agent Communication Edges
+    MESSAGES = "MESSAGES"            # Message: MESSAGE -> agent inbox
+    SUBSCRIBES_TO = "SUBSCRIBES_TO"  # Subscription: subscriber -> publisher
+    REPLY_TO = "REPLY_TO"            # Reply: MESSAGE -> parent MESSAGE
+    HAS_FEEDBACK = "HAS_FEEDBACK"    # User feedback: RESEARCH -> FEEDBACK node
+    # Dialogue-to-Graph Correspondence Edges
+    DEFINES_DIALOGUE = "DEFINES_DIALOGUE"  # Dialogue turn defines/creates a node
 
 
 class NodeStatus(str, Enum):
@@ -463,6 +474,24 @@ TOPOLOGY_CONSTRAINTS: Dict[str, TopologyConstraint] = {
         edge_constraints=(),  # No required edges - standalone events
         allowed_statuses=(
             NodeStatus.VERIFIED.value,  # Events are immutable once created
+        ),
+    ),
+
+    # NOTIFICATION - Cross-Tab Notification
+    NodeType.NOTIFICATION.value: TopologyConstraint(
+        node_type=NodeType.NOTIFICATION.value,
+        description="Cross-tab notification for UI events. May link to source node via TRACES_TO.",
+        edge_constraints=(
+            EdgeConstraint(
+                edge_type=EdgeType.TRACES_TO.value,
+                direction="outgoing",
+                min_count=0,  # Optional - may be global notification
+                mode=ConstraintMode.SOFT.value,
+            ),
+        ),
+        allowed_statuses=(
+            NodeStatus.PENDING.value,   # Unread notification
+            NodeStatus.VERIFIED.value,  # Read notification
         ),
     ),
 }
