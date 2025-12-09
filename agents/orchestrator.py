@@ -21,6 +21,7 @@ Based on legacy: gaadp-constructor/orchestration/langgraph_adapter.py
 """
 from typing import List, Dict, Any, Optional, Literal, Annotated, TypedDict
 from enum import Enum
+from datetime import datetime
 import operator
 import msgspec
 import logging
@@ -59,6 +60,13 @@ try:
 except ImportError:
     _gap_analyzer = None
     SOCRATIC_AVAILABLE = False
+
+# SocraticOrchestrator for full Socratic dialogue (replaces inline import in dialectic_node)
+try:
+    from agents.socrates import SocraticOrchestrator, run_socratic_dialogue
+    SOCRATIC_ORCHESTRATOR_AVAILABLE = True
+except ImportError:
+    SOCRATIC_ORCHESTRATOR_AVAILABLE = False
 
 # Documenter for auto-documentation on success
 try:
@@ -137,6 +145,13 @@ try:
 except ImportError:
     ENVIRONMENT_AVAILABLE = False
 
+# Event bus for error broadcasting to WebSocket clients
+try:
+    from infrastructure.event_bus import publish_orchestrator_error, publish_phase_changed
+    EVENT_BUS_AVAILABLE = True
+except ImportError:
+    EVENT_BUS_AVAILABLE = False
+
 # Optional LLM integration (graceful degradation if not configured)
 try:
     from core.llm import get_llm, StructuredLLM
@@ -169,16 +184,16 @@ logger = logging.getLogger(__name__)
 
 class CyclePhase(str, Enum):
     """TDD cycle phases - now includes Research/Dialectic."""
-    INIT = "init"
-    DIALECTIC = "dialectic"      # Pre-research ambiguity check
-    CLARIFICATION = "clarification"  # Waiting for user answers
-    RESEARCH = "research"        # Socratic research loop
-    PLAN = "plan"
-    BUILD = "build"
-    TEST = "test"
-    FIX = "fix"
-    PASSED = "passed"
-    FAILED = "failed"
+    INIT = "INIT"
+    DIALECTIC = "DIALECTIC"      # Pre-research ambiguity check
+    CLARIFICATION = "CLARIFICATION"  # Waiting for user answers
+    RESEARCH = "RESEARCH"        # Socratic research loop
+    PLAN = "PLAN"
+    BUILD = "BUILD"
+    TEST = "TEST"
+    FIX = "FIX"
+    PASSED = "PASSED"
+    FAILED = "FAILED"
 
 
 class HumanCheckpointType(str, Enum):
@@ -350,7 +365,6 @@ class GraphState(TypedDict):
     ambiguities: Annotated[List[Dict[str, Any]], list_append_reducer]
     clarification_questions: Annotated[List[Dict[str, Any]], list_append_reducer]
     research_findings: Annotated[List[Dict[str, Any]], list_append_reducer]
-    dialectic_passed: bool
     research_complete: bool
 
     # Errors (append)
@@ -364,58 +378,503 @@ class GraphState(TypedDict):
 # NODE FUNCTIONS (State Machine Nodes)
 # =============================================================================
 
+def create_requirement_nodes_from_spec(state: GraphState) -> List[str]:
+    """
+    Parse spec and immediately create REQ nodes.
+
+    PHASE 2: Proactive node creation - no waiting for approval.
+
+    Args:
+        state: Current graph state containing spec
+
+    Returns:
+        List of created node IDs
+    """
+    spec = state.get("spec", "")
+    session_id = state.get("session_id", "unknown")
+    task_id = state.get("task_id", "unknown")
+
+    if not spec or not spec.strip():
+        logger.info("No spec provided, skipping REQ node creation")
+        return []
+
+    # Try to use SpecParser to extract requirements
+    try:
+        from agents.spec_parser import SpecParser
+        from agents.tools import get_db
+
+        # Parse spec using LLM-based parser
+        parser = SpecParser()
+
+        # Create a temporary file for parsing (SpecParser expects a file path)
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+            f.write(spec)
+            temp_path = f.name
+
+        try:
+            parsed = parser.parse_spec(temp_path)
+            requirements = parsed.requirements
+        finally:
+            import os
+            os.unlink(temp_path)
+
+        # If no requirements extracted, create a single REQ for the entire spec
+        if not requirements:
+            requirements = [parsed.title or "Main Requirement"]
+
+        # Create REQ nodes in the graph
+        db = get_db()
+        if db is None:
+            logger.warning("ParagonDB not available, cannot create REQ nodes")
+            return []
+
+        # Create SPEC root node if it doesn't exist
+        spec_id = f"spec_{task_id}"
+        from core.schemas import NodeData, EdgeData
+        from core.ontology import NodeType, NodeStatus, EdgeType
+
+        if not db.has_node(spec_id):
+            spec_node = NodeData(
+                id=spec_id,
+                type=NodeType.SPEC.value,
+                content=parsed.title or "Project Specification",
+                status=NodeStatus.PENDING.value,
+                created_by="orchestrator",
+            )
+            db.add_node(spec_node)
+            from agents.tools import _log_node_created
+            _log_node_created(spec_id, NodeType.SPEC.value, parsed.title or "Project Specification")
+            logger.info(f"Created SPEC node: {spec_id}")
+
+        created_ids = []
+        for idx, req_text in enumerate(requirements):
+            req_id = f"req_{task_id}_{idx}"
+
+            # Check if node already exists
+            if db.has_node(req_id):
+                logger.info(f"REQ node {req_id} already exists")
+                created_ids.append(req_id)
+                continue
+
+            # Create REQ node
+            req_node = NodeData(
+                id=req_id,
+                type=NodeType.REQ.value,
+                content=req_text,
+                status=NodeStatus.PENDING.value,
+                created_by="orchestrator",
+            )
+            db.add_node(req_node)
+
+            # CRITICAL FIX: Log node creation to trigger persistence
+            # This ensures API workers can see nodes via parquet files
+            from agents.tools import _log_node_created
+            _log_node_created(req_id, NodeType.REQ.value, req_text)
+
+            created_ids.append(req_id)
+            logger.info(f"Created REQ node: {req_id} - {req_text[:50]}...")
+
+        # Create edges from SPEC to all REQ nodes
+        from agents.tools import add_edge
+        for req_id in created_ids:
+            try:
+                add_edge(
+                    source_id=spec_id,
+                    target_id=req_id,
+                    edge_type="DEFINES",
+                )
+                logger.info(f"Created edge: {spec_id} -> {req_id}")
+            except Exception as e:
+                logger.warning(f"Failed to create edge {spec_id} -> {req_id}: {e}")
+
+        return created_ids
+
+    except Exception as e:
+        logger.warning(f"Failed to parse spec and create REQ nodes: {e}")
+        logger.warning(f"Continuing without REQ nodes - user can provide feedback to clarify")
+        return []
+
+
+def process_user_message(state: GraphState, message: str) -> Dict[str, Any]:
+    """
+    Process user message at any time during orchestration.
+
+    UNIFIED CONVERSATION: This is the primary interaction method.
+    Users can send messages without waiting for approval or phase transitions.
+
+    Classifies message intent and updates graph accordingly:
+    - new_requirement: Creates new REQ node
+    - clarification: Updates existing nodes with context
+    - modification: Revises graph based on feedback
+    - approval: Clears pending_human_input and continues
+    - question: Stores as CLARIFICATION node for context
+    - commentary: Acknowledges and continues
+
+    Args:
+        state: Current graph state
+        message: User's message content
+
+    Returns:
+        State updates with processed message and orchestrator response
+    """
+    from agents.tools import get_db
+    from core.schemas import NodeData
+    from core.ontology import NodeType, NodeStatus
+
+    session_id = state.get("session_id", "unknown")
+    task_id = state.get("task_id", "unknown")
+    current_phase = state.get("phase", "INIT")
+
+    logger.info(f"Processing user message in session {session_id}, phase {current_phase}: {message[:50]}...")
+
+    # Store message in conversation history
+    new_message = {
+        "role": "user",
+        "content": message,
+        "timestamp": str(datetime.now()),
+        "phase": current_phase,
+    }
+
+    # Enhanced intent classification with more context awareness
+    message_lower = message.lower()
+
+    # Check for approval/confirmation
+    if any(keyword in message_lower for keyword in ["yes", "approve", "proceed", "continue", "go ahead", "looks good", "let's build"]):
+        intent = "approval"
+    # Check for new requirement
+    elif any(keyword in message_lower for keyword in ["add", "also need", "requirement", "must have", "feature", "should include"]):
+        intent = "new_requirement"
+    # Check for modification request
+    elif any(keyword in message_lower for keyword in ["change", "update", "modify", "instead", "revise", "fix"]):
+        intent = "modification"
+    # Check for question
+    elif any(keyword in message_lower for keyword in ["?", "how", "what", "when", "where", "why", "which", "can you"]):
+        intent = "question"
+    # Check for rejection
+    elif any(keyword in message_lower for keyword in ["no", "wait", "stop", "cancel", "reject"]):
+        intent = "rejection"
+    else:
+        # Default: treat as new requirement if substantial, otherwise commentary
+        if len(message.split()) > 5:
+            intent = "new_requirement"
+        else:
+            intent = "commentary"
+
+    logger.info(f"Classified message intent as: {intent}")
+
+    # Handle based on intent
+    db = get_db()
+    response_message = None
+
+    if intent == "approval":
+        # User approves - clear pending input and allow orchestrator to continue
+        logger.info("User approved - clearing pending_human_input")
+        return {
+            "messages": [new_message],
+            "human_response": message,
+            "pending_human_input": None,  # Clear to allow continuation
+        }
+
+    elif intent == "new_requirement" and db:
+        # Create new REQ node
+        import uuid
+        req_id = f"req_{task_id}_{uuid.uuid4().hex[:8]}"
+
+        req_node = NodeData(
+            id=req_id,
+            type=NodeType.REQ.value,
+            content=message,
+            status=NodeStatus.PENDING.value,
+            created_by="user",
+        )
+        db.add_node(req_node)
+        logger.info(f"Created new REQ node from user message: {req_id}")
+
+        # Generate response acknowledging the new requirement
+        response_message = {
+            "role": "system",
+            "content": f"Added new requirement: {message[:100]}... I'll incorporate this into the implementation plan.",
+            "timestamp": str(datetime.now()),
+            "phase": current_phase,
+        }
+
+    elif intent == "question" and db:
+        # Store question as CLARIFICATION node for context
+        import uuid
+        clarif_id = f"clarif_{task_id}_{uuid.uuid4().hex[:8]}"
+
+        clarif_node = NodeData(
+            id=clarif_id,
+            type=NodeType.CLARIFICATION.value,
+            content=message,
+            status=NodeStatus.PENDING.value,
+            created_by="user",
+            data={
+                "role": "question",
+                "session_id": session_id,
+                "phase": current_phase,
+            }
+        )
+        db.add_node(clarif_node)
+        logger.info(f"Stored user question as CLARIFICATION node: {clarif_id}")
+
+        # TODO: Generate intelligent response using LLM based on current context
+        response_message = {
+            "role": "system",
+            "content": "I've noted your question. I'll address this as I continue working on your project.",
+            "timestamp": str(datetime.now()),
+            "phase": current_phase,
+        }
+
+    elif intent == "modification":
+        # TODO: Implement modification logic (update existing REQ nodes)
+        response_message = {
+            "role": "system",
+            "content": "I'll update the requirements based on your feedback.",
+            "timestamp": str(datetime.now()),
+            "phase": current_phase,
+        }
+
+    elif intent == "rejection":
+        # User wants to revise - keep pending_human_input set
+        response_message = {
+            "role": "system",
+            "content": "Understood. Please provide your feedback or clarifications, and I'll adjust accordingly.",
+            "timestamp": str(datetime.now()),
+            "phase": current_phase,
+        }
+
+    else:
+        # Commentary - acknowledge
+        response_message = {
+            "role": "system",
+            "content": "Noted. I'll continue working on your project.",
+            "timestamp": str(datetime.now()),
+            "phase": current_phase,
+        }
+
+    # Return state updates including response message
+    messages_to_add = [new_message]
+    if response_message:
+        messages_to_add.append(response_message)
+
+    return {
+        "messages": messages_to_add,
+        "human_response": message,  # Update human_response field
+        "pending_human_input": None if intent == "approval" else state.get("pending_human_input"),
+    }
+
+
 def init_node(state: GraphState) -> Dict[str, Any]:
     """
     Initialize the orchestration cycle.
 
     - Validate inputs
     - Set up initial state
+    - IMMEDIATELY create REQ nodes from spec (Phase 2: Proactive approach)
     - Transition to DIALECTIC (pre-research ambiguity check)
     """
+    # Phase 2: Proactively create REQ nodes from spec
+    req_node_ids = create_requirement_nodes_from_spec(state)
+
     return {
         "phase": CyclePhase.DIALECTIC.value,
         "messages": [{
             "role": "system",
-            "content": f"Starting TDD cycle for task: {state.get('task_id', 'unknown')}"
+            "content": f"Starting TDD cycle for task: {state.get('task_id', 'unknown')}. Created {len(req_node_ids)} requirement nodes."
         }],
         "iteration": 0,
         "ambiguities": [],
         "clarification_questions": [],
         "research_findings": [],
-        "dialectic_passed": False,
         "research_complete": False,
     }
 
 
 def dialectic_node(state: GraphState) -> Dict[str, Any]:
     """
-    Dialectic phase - pre-research ambiguity detection.
+    Dialectic phase - Run full Socratic dialogue for requirement clarification.
 
-    Analyzes the requirement for subjective terms, undefined references,
-    and missing context. Creates clarification questions if needed.
+    NEW IMPLEMENTATION: Uses SocraticOrchestrator for complete L1->L2->L3->Terminal flow.
 
-    Uses both:
-    1. LLM-based analysis (DialectorOutput)
-    2. SocraticEngine gap analysis (canonical questions)
+    This node now:
+    1. Creates a SocraticOrchestrator instance
+    2. Runs the full dialogue (pauses for human input at each level)
+    3. Persists Q&A to graph as CLARIFICATION nodes
+    4. Returns augmented spec with all clarifications
 
     Flow:
-    - If CLEAR: proceed to RESEARCH
-    - If NEEDS_CLARIFICATION: proceed to CLARIFICATION (wait for user)
+    - If dialogue APPROVED: proceed to RESEARCH with augmented spec
+    - If NOT approved or incomplete: stay in CLARIFICATION (wait for user)
+    - Autonomous mode is handled via initial phase setting in orchestrator.run()
     """
     spec = state.get("spec", "")
     session_id = state.get("session_id", "unknown")
+    task_id = state.get("task_id", "unknown")
+
+    # Check if autonomous mode (skip dialectic)
+    # Note: Autonomous mode is handled via initial phase setting, not a flag
+    # This check is kept for backward compatibility but can be removed in future
 
     messages = [{
         "role": "assistant",
-        "content": "Analyzing requirement for ambiguity..."
+        "content": "Starting Socratic dialogue for requirement clarification..."
+    }]
+
+    # Check if SocraticOrchestrator is available
+    if not SOCRATIC_ORCHESTRATOR_AVAILABLE:
+        logger.warning("SocraticOrchestrator not available, using legacy dialectic")
+        return _legacy_dialectic_node(state)
+
+    # NEW: Use SocraticOrchestrator for full dialogue
+    try:
+        from agents.tools import get_db
+
+        db = get_db()
+        if db is None:
+            # Fallback to old dialectic if DB not available
+            logger.warning("ParagonDB not available, using legacy dialectic")
+            return _legacy_dialectic_node(state)
+
+        # Run Socratic dialogue
+        socrates = SocraticOrchestrator(db, enable_checkpointing=True)
+
+        # Create or find REQ node for this task
+        req_node_id = f"req_{task_id}"
+        if not db.has_node(req_node_id):
+            from core.schemas import NodeData
+            from core.ontology import NodeType, NodeStatus
+            # Use constructor directly since we want to specify our own id
+            req_node = NodeData(
+                id=req_node_id,
+                type=NodeType.REQ.value,
+                content=spec,
+                status=NodeStatus.PENDING.value,
+                created_by="orchestrator",
+            )
+            db.add_node(req_node)
+
+        # Run the dialogue (this will pause for human input)
+        result = socrates.run(
+            req_id=req_node_id,
+            spec_content=spec,
+            session_id=f"socratic_{session_id}",
+        )
+
+        messages.append({
+            "role": "assistant",
+            "content": (
+                f"Socratic dialogue complete. "
+                f"Approved: {result.approved}. "
+                f"Questions answered: {result.answered_questions}/{result.total_questions}. "
+                f"Out of scope items: {len(result.out_of_scope)}"
+            ),
+        })
+
+        # Determine next phase based on approval
+        if result.approved:
+            next_phase = CyclePhase.RESEARCH.value
+            messages.append({
+                "role": "assistant",
+                "content": "User approved specification. Proceeding to research."
+            })
+        else:
+            next_phase = CyclePhase.CLARIFICATION.value
+            messages.append({
+                "role": "assistant",
+                "content": "Awaiting user approval or additional clarifications."
+            })
+
+        return {
+            "phase": next_phase,
+            "messages": messages,
+            "spec": result.augmented_spec,  # Updated spec with clarifications
+            "socratic_session_id": result.session_id,
+            "out_of_scope": result.out_of_scope,
+            "assumptions": result.assumptions,
+            "pending_human_input": None if result.approved else "socratic_approval",
+        }
+
+    except ImportError:
+        # Fallback to old dialectic if SocraticOrchestrator not available
+        logger.warning("SocraticOrchestrator not available, using legacy dialectic")
+        return _legacy_dialectic_node(state)
+    except Exception as e:
+        logger.error(f"Socratic dialogue failed: {e}")
+        # Broadcast error to WebSocket clients
+        if EVENT_BUS_AVAILABLE:
+            try:
+                publish_orchestrator_error(
+                    error_message=str(e),
+                    phase="DIALECTIC",
+                    error_type=type(e).__name__
+                )
+            except Exception:
+                pass  # Don't let event bus break orchestrator
+        # Fallback to old dialectic on error
+        return _legacy_dialectic_node(state)
+
+
+def _legacy_dialectic_node(state: GraphState) -> Dict[str, Any]:
+    """
+    LEGACY dialectic implementation (pre-Socratic integration).
+
+    Uses conditional question selection strategy with multi-source questions.
+    Kept as fallback for when SocraticOrchestrator is not available.
+    """
+    spec = state.get("spec", "")
+    session_id = state.get("session_id", "unknown")
+    phase = state.get("phase", "initial")
+
+    messages = [{
+        "role": "assistant",
+        "content": "Analyzing requirement and selecting questions..."
     }]
 
     ambiguities = []
     clarification_questions = []
-    next_phase = CyclePhase.RESEARCH.value  # Default: proceed to research
+    # CRITICAL: Default to CLARIFICATION - we ALWAYS need user approval before proceeding
+    # Even if the spec is perfectly clear, the user must explicitly confirm they're ready
+    next_phase = CyclePhase.CLARIFICATION.value  # Always require user approval
 
-    # Run SocraticEngine gap analysis first (fast, deterministic)
-    if SOCRATIC_AVAILABLE and _gap_analyzer:
+    # NEW: Use QuestionSelector for conditional question selection
+    try:
+        from agents.question_selector import select_questions_for_dialectic
+
+        # Select questions using multi-source strategy
+        selected_questions = select_questions_for_dialectic(
+            initial_prompt=spec,
+            phase=phase,
+            research_findings=state.get("research_findings", []),
+            module_complete=False,  # TODO: Implement module completion detection
+            software_complete=False,  # TODO: Implement software completion detection
+        )
+
+        messages.append({
+            "role": "tool",
+            "content": f"Question selector identified {len(selected_questions)} questions",
+            "tool_name": "question_selector",
+            "tool_result": {"question_count": len(selected_questions)},
+        })
+
+        # Convert selected questions to clarification format
+        for sq in selected_questions:
+            clarification_questions.append({
+                "question": sq.question,
+                "category": sq.category,
+                "priority": sq.priority,
+                "suggested_answer": sq.suggested_answer,
+                "source": sq.source.value,
+                "rationale": sq.rationale,
+            })
+    except ImportError:
+        logger.warning("QuestionSelector not available, falling back to basic analysis")
+    except Exception as e:
+        logger.warning(f"Question selector failed: {e}, falling back to basic analysis")
+
+    # Fallback: Run SocraticEngine gap analysis if question selector failed
+    if not clarification_questions and SOCRATIC_AVAILABLE and _gap_analyzer:
         try:
             gaps = _gap_analyzer.analyze_spec(spec)
             if gaps:
@@ -524,23 +983,52 @@ Analyze for ambiguity. Return structured output with verdict (CLEAR or NEEDS_CLA
                         "suggested_answer": getattr(amb, 'suggested_answer', None),
                     })
 
-                if clarification_questions:
-                    next_phase = CyclePhase.CLARIFICATION.value
+                # Always add at least a confirmation question for mutual agreement
+                if not clarification_questions:
+                    # CRITICAL: Even if spec is clear, user must confirm they're ready to proceed
+                    clarification_questions.append({
+                        "question": "I've analyzed your specification and it appears complete. Do you have any additional requirements, clarifications, or questions before we proceed to implementation?",
+                        "category": "CONFIRMATION",
+                        "text": "Spec review confirmation",
+                        "suggested_answer": "No, the specification is complete. Please proceed.",
+                    })
                     messages.append({
                         "role": "assistant",
-                        "content": f"Found {len(clarification_questions)} blocking ambiguities. Waiting for user clarification."
+                        "content": "Specification appears clear. Asking for confirmation before proceeding."
                     })
+                else:
+                    messages.append({
+                        "role": "assistant",
+                        "content": f"Found {len(clarification_questions)} ambiguities. Waiting for user clarification."
+                    })
+
+                # Always require clarification phase for mutual agreement
+                next_phase = CyclePhase.CLARIFICATION.value
 
         except Exception as e:
             logger.warning(f"Dialectic analysis failed: {e}")
+            # Even on error, we still need user confirmation
+            clarification_questions.append({
+                "question": "Dialectic analysis encountered an issue. Please review your specification and confirm you're ready to proceed, or provide any clarifications.",
+                "category": "CONFIRMATION",
+                "text": "Fallback confirmation",
+                "suggested_answer": "Proceed with the current specification.",
+            })
             messages.append({
                 "role": "assistant",
-                "content": f"Dialectic analysis unavailable ({e}), proceeding to research"
+                "content": f"Dialectic analysis unavailable ({e}), but still requiring user confirmation"
             })
     else:
+        # Even without LLM, we need user confirmation
+        clarification_questions.append({
+            "question": "LLM analysis is not available. Please review your specification and confirm you're ready to proceed to implementation.",
+            "category": "CONFIRMATION",
+            "text": "No-LLM confirmation",
+            "suggested_answer": "Proceed with the current specification.",
+        })
         messages.append({
             "role": "assistant",
-            "content": "LLM not configured, skipping dialectic analysis"
+            "content": "LLM not configured, but still requiring user confirmation before proceeding"
         })
 
     return {
@@ -548,8 +1036,8 @@ Analyze for ambiguity. Return structured output with verdict (CLEAR or NEEDS_CLA
         "messages": messages,
         "ambiguities": ambiguities,
         "clarification_questions": clarification_questions,
-        "dialectic_passed": (next_phase == CyclePhase.RESEARCH.value),
-        "pending_human_input": "clarification" if next_phase == CyclePhase.CLARIFICATION.value else None,
+        # ALWAYS require human input - this is the mutual agreement requirement
+        "pending_human_input": "clarification",
     }
 
 
@@ -737,7 +1225,6 @@ def clarification_node(state: GraphState) -> Dict[str, Any]:
             "phase": CyclePhase.RESEARCH.value,
             "messages": messages,
             "spec": augmented_spec,
-            "dialectic_passed": True,
             "pending_human_input": None,
         }
     else:
@@ -857,6 +1344,18 @@ Transform this into a structured Research Artifact with concrete examples, type 
 """
             augmented_spec = f"{spec}\n{research_summary}"
 
+            # Trigger notification for research completion
+            try:
+                create_notification(
+                    notification_type="research_complete",
+                    message=f"Research complete: {result.task_category} - {len(result.happy_path_examples)} examples generated",
+                    target_tabs=["research", "specification"],
+                    urgency="info",
+                    source_component="orchestrator",
+                )
+            except Exception as e:
+                logger.warning(f"Failed to create research completion notification: {e}")
+
             return {
                 "phase": next_phase,
                 "messages": messages,
@@ -867,6 +1366,16 @@ Transform this into a structured Research Artifact with concrete examples, type 
 
         except Exception as e:
             logger.warning(f"Research phase failed: {e}")
+            # Broadcast error to WebSocket clients
+            if EVENT_BUS_AVAILABLE:
+                try:
+                    publish_orchestrator_error(
+                        error_message=str(e),
+                        phase="RESEARCH",
+                        error_type=type(e).__name__
+                    )
+                except Exception:
+                    pass  # Don't let event bus break orchestrator
             messages.append({
                 "role": "assistant",
                 "content": f"Research unavailable ({e}), proceeding to planning"
@@ -929,6 +1438,10 @@ Each component must be:
 - Testable: has clear success criteria
 - Independent: can be built after its dependencies are satisfied
 
+IMPORTANT: You must also identify:
+- out_of_scope: Items explicitly excluded from this implementation (features, use cases, edge cases)
+- assumptions: Assumptions made during planning (e.g., "assumes Python 3.10+", "assumes PostgreSQL database")
+
 Output a structured implementation plan."""
 
             user_prompt = f"""# Task Specification
@@ -938,7 +1451,11 @@ Output a structured implementation plan."""
 # Requirements
 {chr(10).join(f"- {r}" for r in requirements) if requirements else "No specific requirements provided."}
 
-Decompose this into atomic, implementable components."""
+Decompose this into atomic, implementable components.
+
+Make sure to identify:
+1. Items that are explicitly OUT OF SCOPE for this implementation
+2. Key ASSUMPTIONS you're making during the planning phase"""
 
             # Generate plan using structured output
             plan_result = llm.generate(
@@ -970,6 +1487,8 @@ Dependencies: {', '.join(component.dependencies) if component.dependencies else 
                         "component_name": component.name,
                         "component_type": component.type,
                         "dependencies": component.dependencies,
+                        "out_of_scope": plan_result.out_of_scope,
+                        "assumptions": plan_result.assumptions,
                     },
                     created_by="architect_agent",
                 )
@@ -995,8 +1514,31 @@ Dependencies: {', '.join(component.dependencies) if component.dependencies else 
                         edge_type="DEPENDS_ON",
                     )
 
+            # Trigger notification for spec creation
+            if spec_node_ids:
+                try:
+                    create_notification(
+                        notification_type="spec_updated",
+                        message=f"Planning complete: {len(spec_node_ids)} specifications created",
+                        target_tabs=["specification", "build"],
+                        urgency="info",
+                        source_component="orchestrator",
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to create spec notification: {e}")
+
         except Exception as e:
             logger.warning(f"LLM planning failed, using fallback: {e}")
+            # Broadcast error to WebSocket clients
+            if EVENT_BUS_AVAILABLE:
+                try:
+                    publish_orchestrator_error(
+                        error_message=str(e),
+                        phase="PLAN",
+                        error_type=type(e).__name__
+                    )
+                except Exception:
+                    pass  # Don't let event bus break orchestrator
             messages.append({
                 "role": "assistant",
                 "content": f"LLM planning unavailable ({e}), proceeding with basic plan"
@@ -1150,6 +1692,16 @@ Implement complete, working Python code for this specification."""
 
                 except Exception as e:
                     logger.warning(f"Code generation failed for {spec_id}: {e}")
+                    # Broadcast error to WebSocket clients
+                    if EVENT_BUS_AVAILABLE:
+                        try:
+                            publish_orchestrator_error(
+                                error_message=f"Code generation failed for {spec_id}: {str(e)}",
+                                phase="BUILD",
+                                error_type=type(e).__name__
+                            )
+                        except Exception:
+                            pass  # Don't let event bus break orchestrator
                     messages.append({
                         "role": "assistant",
                         "content": f"Failed to generate code for {component_name}: {e}"
@@ -1250,6 +1802,16 @@ def test_node(state: GraphState) -> Dict[str, Any]:
                 })
         except Exception as e:
             logger.debug(f"Quality gate check failed: {e}")
+            # Broadcast error to WebSocket clients
+            if EVENT_BUS_AVAILABLE:
+                try:
+                    publish_orchestrator_error(
+                        error_message=f"Quality gate check failed: {str(e)}",
+                        phase="TEST",
+                        error_type=type(e).__name__
+                    )
+                except Exception:
+                    pass  # Don't let event bus break orchestrator
 
     # Divergence detection: log for learning system
     if DIVERGENCE_AVAILABLE and TRAINING_STORE_AVAILABLE:
@@ -1271,6 +1833,16 @@ def test_node(state: GraphState) -> Dict[str, Any]:
                 })
         except Exception as e:
             logger.debug(f"Divergence detection failed: {e}")
+            # Broadcast error to WebSocket clients
+            if EVENT_BUS_AVAILABLE:
+                try:
+                    publish_orchestrator_error(
+                        error_message=f"Divergence detection failed: {str(e)}",
+                        phase="TEST",
+                        error_type=type(e).__name__
+                    )
+                except Exception:
+                    pass  # Don't let event bus break orchestrator
 
     # Determine next phase
     if test_passed:
@@ -1294,10 +1866,13 @@ def fix_node(state: GraphState) -> Dict[str, Any]:
     - Analyze test failures
     - Generate fixes
     - Increment iteration counter
+    - Perform forensic attribution analysis
     """
     iteration = state.get("iteration", 0)
     max_iterations = state.get("max_iterations", 3)
     test_results = state.get("test_results", [])
+    session_id = state.get("session_id", "unknown")
+    code_node_ids = state.get("code_node_ids", [])
 
     # Increment iteration
     iteration += 1
@@ -1321,9 +1896,48 @@ def fix_node(state: GraphState) -> Dict[str, Any]:
         }
 
     # Get last failure info
+    attribution_results = []
     if test_results:
         last_result = test_results[-1]
         failure_errors = last_result.get("errors", [])
+
+        # Forensic Attribution Analysis: Determine which agent/model caused the failure
+        if ATTRIBUTION_AVAILABLE and TRAINING_STORE_AVAILABLE and failure_errors:
+            try:
+                store = TrainingStore()
+                analyzer = ForensicAnalyzer(store)
+
+                # Analyze each failure error
+                for error in failure_errors:
+                    # Extract error type and message
+                    error_type = error.split(":")[0] if ":" in error else "UnknownError"
+                    error_message = error
+
+                    # Perform forensic analysis
+                    attribution = analyzer.analyze_failure(
+                        session_id=session_id,
+                        error_type=error_type,
+                        error_message=error_message,
+                        failed_node_id=code_node_ids[0] if code_node_ids else None,
+                    )
+                    attribution_results.append(attribution)
+
+                    # Log attribution for visibility
+                    messages.append({
+                        "role": "tool",
+                        "content": f"Attribution: {attribution.failure_code.value} -> {attribution.attributed_agent_id} ({attribution.confidence:.1%} confidence)",
+                        "tool_name": "forensic_analyzer",
+                        "tool_result": {
+                            "failure_code": attribution.failure_code.value,
+                            "attributed_agent": attribution.attributed_agent_id,
+                            "attributed_model": attribution.attributed_model_id,
+                            "confidence": attribution.confidence,
+                            "reasoning": attribution.reasoning,
+                        },
+                    })
+            except Exception as e:
+                logger.debug(f"Attribution analysis failed: {e}")
+
         messages.append({
             "role": "assistant",
             "content": f"Fixing {len(failure_errors)} errors: {failure_errors}"
@@ -1404,15 +2018,26 @@ def passed_node(state: GraphState) -> Dict[str, Any]:
     # This will generate README/wiki/changelog and create a git commit
     try:
         from agents.tools import flush_transaction
-        flush_transaction(agent_id="orchestrator-success")
+        flush_result = flush_transaction(agent_id="orchestrator-success")
         messages.append({
             "role": "tool",
-            "content": "Documentation generated and changes committed",
+            "content": flush_result.message,
             "tool_name": "flush_transaction",
-            "tool_result": {"committed": True},
+            "tool_result": {
+                "success": flush_result.success,
+                "message": flush_result.message,
+            },
         })
+        if not flush_result.success:
+            logger.warning(f"Transaction flush had issues: {flush_result.message}")
     except Exception as e:
         logger.debug(f"Transaction flush failed: {e}")
+        messages.append({
+            "role": "tool",
+            "content": f"Transaction flush error: {e}",
+            "tool_name": "flush_transaction",
+            "tool_result": {"success": False, "error": str(e)},
+        })
 
     # Learning: Record successful outcome for adaptive model selection
     try:
@@ -1544,8 +2169,12 @@ def failed_node(state: GraphState) -> Dict[str, Any]:
 
 def route_after_dialectic(state: GraphState) -> str:
     """Route after dialectic analysis - to clarification if ambiguities found."""
+    # CRITICAL: Check if we need human input and pause if so
+    if state.get("pending_human_input"):
+        return END  # Pause graph to wait for human input
+
     ambiguities = state.get("ambiguities", [])
-    if ambiguities and not state.get("dialectic_passed", False):
+    if ambiguities:
         return "clarification"
     else:
         return "research"
@@ -1553,13 +2182,13 @@ def route_after_dialectic(state: GraphState) -> str:
 
 def route_after_clarification(state: GraphState) -> str:
     """Route after clarification - back to dialectic or forward to research."""
-    # If we have pending human input, we wait (handled by interrupt)
-    # Once human responds, we continue to research
-    if state.get("dialectic_passed", False):
-        return "research"
-    else:
-        # Re-check for more ambiguities after clarification
-        return "dialectic"
+    # CRITICAL: If we have pending human input, pause the graph
+    if state.get("pending_human_input"):
+        return END  # Pause graph to wait for human input
+
+    # Once human responds and clears pending_human_input, continue to research
+    # No need to re-check dialectic - if we reached clarification, we should proceed
+    return "research"
 
 
 def route_after_research(state: GraphState) -> str:
@@ -1639,22 +2268,26 @@ def create_tdd_graph() -> StateGraph:
     graph.add_edge("init", "dialectic")
 
     # Conditional routing after dialectic - to clarification if ambiguities found
+    # CRITICAL: END is included to allow pausing for human input
     graph.add_conditional_edges(
         "dialectic",
         route_after_dialectic,
         {
             "clarification": "clarification",
             "research": "research",
+            END: END,  # Pause for human input
         }
     )
 
     # After clarification, route back to dialectic or forward to research
+    # CRITICAL: END is included to allow pausing for human input
     graph.add_conditional_edges(
         "clarification",
         route_after_clarification,
         {
             "dialectic": "dialectic",
             "research": "research",
+            END: END,  # Pause for human input
         }
     )
 
@@ -1747,12 +2380,17 @@ class TDDOrchestrator:
             checkpoint_db_path: Path to SQLite database for checkpoints
         """
         self.checkpointer = None
+        self._sqlite_conn = None  # Keep reference to close later
         if enable_checkpointing:
             if persist_to_sqlite and SQLITE_AVAILABLE:
                 # Production mode: durable persistence
                 from pathlib import Path
+                import sqlite3
                 Path(checkpoint_db_path).parent.mkdir(parents=True, exist_ok=True)
-                self.checkpointer = SqliteSaver.from_conn_string(checkpoint_db_path)
+                # SqliteSaver.from_conn_string returns a context manager in newer versions
+                # We need to create the connection manually and keep it alive
+                self._sqlite_conn = sqlite3.connect(checkpoint_db_path, check_same_thread=False)
+                self.checkpointer = SqliteSaver(self._sqlite_conn)
                 logger.info(f"Using SqliteSaver for durable checkpointing: {checkpoint_db_path}")
             else:
                 # Development mode: in-memory only
@@ -1780,6 +2418,7 @@ class TDDOrchestrator:
         max_iterations: int = 3,
         fresh: bool = True,
         initial_phase: Optional[str] = None,
+        autonomous_mode: bool = False,
     ) -> Dict[str, Any]:
         """
         Run a TDD cycle to completion.
@@ -1796,6 +2435,8 @@ class TDDOrchestrator:
             initial_phase: Optional initial phase to start in (e.g., "research", "plan").
                           If not provided, starts at "init" which transitions to "dialectic".
                           Use this when loading a spec file to skip dialectic if appropriate.
+            autonomous_mode: If True, skip the dialectic/clarification phase and proceed
+                           directly to planning. Default is False (require human approval).
 
         Returns:
             Final state dictionary
@@ -1901,11 +2542,10 @@ class TDDOrchestrator:
             "pending_human_input": None,
             "human_response": None,
             "final_status": None,
-            # Pre-populate dialectic state if skipping init
+            # Pre-populate dialectic state
             "ambiguities": [],
             "clarification_questions": [],
             "research_findings": [],
-            "dialectic_passed": skip_init,  # Mark as passed if we're skipping init/dialectic
             "research_complete": False,
         }
 
@@ -1953,7 +2593,7 @@ class TDDOrchestrator:
                     if new_phase and new_phase != current_phase:
                         if current_phase is not None:
                             diag.end_phase(success=True)
-                        diag.start_phase(new_phase.upper())
+                        diag.start_phase(new_phase)
                         current_phase = new_phase
 
                 # Merge updates into final_state
@@ -2040,6 +2680,104 @@ class TDDOrchestrator:
 # =============================================================================
 # CONVENIENCE FUNCTIONS
 # =============================================================================
+
+def create_notification(
+    notification_type: str,
+    message: str,
+    target_tabs: List[str],
+    urgency: str = "info",
+    related_node_id: Optional[str] = None,
+    action_required: bool = False,
+    source_component: str = "orchestrator",
+) -> Optional[str]:
+    """
+    Create and publish a notification.
+
+    This is a helper function for orchestrator and agents to create notifications
+    that will be broadcasted to connected UI clients via WebSocket.
+
+    Args:
+        notification_type: Type of notification (spec_updated, research_complete,
+            approval_needed, phase_changed, etc.)
+        message: Human-readable notification message
+        target_tabs: List of UI tabs to show notification in (e.g., ["build", "research"])
+        urgency: Urgency level - "info", "warning", or "critical"
+        related_node_id: Optional node ID this notification relates to
+        action_required: Whether this notification requires user action
+        source_component: Component creating the notification (default: orchestrator)
+
+    Returns:
+        Notification node ID if successful, None otherwise
+
+    Example:
+        # Notify when research completes
+        create_notification(
+            notification_type="research_complete",
+            message="Research findings available for review",
+            target_tabs=["research", "specification"],
+            urgency="info",
+            related_node_id=research_node_id,
+        )
+    """
+    try:
+        from core.graph_db import get_db
+        from core.schemas import NodeData, EdgeData
+        from core.ontology import NodeType, NodeStatus, EdgeType
+
+        # Create notification node
+        db = get_db()
+        notification_node = NodeData.create(
+            type=NodeType.NOTIFICATION.value,
+            content=message,
+            data={
+                "notification_type": notification_type,
+                "source_component": source_component,
+                "target_tabs": target_tabs,
+                "urgency": urgency,
+                "related_node_id": related_node_id,
+                "action_required": action_required,
+                "read_by": [],
+            },
+            status=NodeStatus.PENDING.value,
+            created_by=source_component,
+        )
+
+        db.add_node(notification_node)
+
+        # Link to related node if provided
+        if related_node_id:
+            try:
+                edge_data = EdgeData.create(
+                    source_id=notification_node.id,
+                    target_id=related_node_id,
+                    type=EdgeType.TRACES_TO.value,
+                )
+                db.add_edge(edge_data)
+            except Exception as e:
+                logger.warning(f"Failed to link notification to node {related_node_id}: {e}")
+
+        # Publish notification event for WebSocket broadcasting
+        if EVENT_BUS_AVAILABLE:
+            from infrastructure.event_bus import publish_notification
+            publish_notification(
+                notification_type=notification_type,
+                message=message,
+                target_tabs=target_tabs,
+                urgency=urgency,
+                related_node_id=related_node_id,
+                metadata={
+                    "notification_id": notification_node.id,
+                    "action_required": action_required,
+                },
+                source=source_component,
+            )
+
+        return notification_node.id
+
+    except Exception as e:
+        logger.error(f"Failed to create notification: {e}")
+        return None
+
 
 def run_tdd_cycle(
     spec: str,
