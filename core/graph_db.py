@@ -27,7 +27,7 @@ Performance Characteristics:
 - Memory: ~60% of NetworkX for same graph
 """
 import rustworkx as rx
-from typing import Dict, List, Optional, Set, Tuple, Any, Iterator
+from typing import Dict, List, Optional, Set, Tuple, Any, Iterator, Literal
 from pathlib import Path
 import polars as pl
 

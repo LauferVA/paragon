@@ -36,7 +36,7 @@ Usage:
 
     event_bus.subscribe_async(EventType.NODE_CREATED, on_node_created)
 """
-from typing import Callable, List, Dict, Any
+from typing import Callable, List, Dict, Any, Optional
 from enum import Enum
 import msgspec
 import asyncio

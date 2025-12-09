@@ -55,6 +55,14 @@ from viz.core import (
 )
 from agents.tools import get_db  # Use shared database instance
 
+# Research feedback endpoints
+from api.research_feedback_endpoints import (
+    get_research_task as _get_research_task,
+    submit_research_feedback as _submit_research_feedback,
+    submit_research_response as _submit_research_response,
+    get_active_research_tasks as _get_active_research_tasks,
+)
+
 # Event bus for real-time graph change notifications
 try:
     from infrastructure.event_bus import get_event_bus, GraphEvent, EventType
@@ -1139,6 +1147,18 @@ async def broadcast_json(message: Dict[str, Any]) -> None:
     _ws_connections.difference_update(dead)
 
 
+async def broadcast_to_all_clients(message: Dict[str, Any]) -> None:
+    """
+    Broadcast a message to all connected WebSocket clients.
+
+    This is an alias for broadcast_json() for clarity in team documentation.
+
+    Args:
+        message: Dictionary to send as JSON
+    """
+    await broadcast_json(message)
+
+
 async def broadcast_graph_event(event: GraphEvent) -> None:
     """
     Convert graph events to WebSocket deltas and broadcast.
@@ -1319,6 +1339,74 @@ async def broadcast_graph_event(event: GraphEvent) -> None:
                 }
             }
             await broadcast_json(dialogue_msg)
+
+        elif event.type == EventType.RESEARCH_FEEDBACK_RECEIVED:
+            # Broadcast research feedback to connected clients
+            research_feedback_msg = {
+                "type": "research_feedback",
+                "data": {
+                    "research_task_id": event.payload.get("research_node_id", ""),
+                    "feedback": event.payload.get("feedback_text", ""),
+                    "feedback_node_id": event.payload.get("feedback_node_id", ""),
+                    "metadata": event.payload.get("metadata", {}),
+                    "timestamp": datetime.fromtimestamp(event.timestamp, timezone.utc).isoformat(),
+                }
+            }
+            await broadcast_json(research_feedback_msg)
+
+        elif event.type == EventType.RESEARCH_TASK_COMPLETED:
+            # Broadcast research completion to connected clients
+            research_completed_msg = {
+                "type": "research_completed",
+                "data": {
+                    "research_task_id": event.payload.get("research_node_id", ""),
+                    "approval_state": event.payload.get("approved", "unknown"),
+                    "message_id": event.payload.get("message_id", ""),
+                    "timestamp": datetime.fromtimestamp(event.timestamp, timezone.utc).isoformat(),
+                }
+            }
+            await broadcast_json(research_completed_msg)
+
+        elif event.type == EventType.MESSAGE_CREATED:
+            # Broadcast message creation (triggers graph update with new message node)
+            # This will cause the graph to be re-rendered with the new MESSAGE node
+            message_id = event.payload.get("message_id")
+            if message_id:
+                try:
+                    # Fetch the message node and broadcast as a node creation
+                    message_node = db.get_node(message_id)
+                    viz_node = VizNode.from_node_data(message_node)
+
+                    delta = GraphDelta(
+                        timestamp=datetime.fromtimestamp(event.timestamp, timezone.utc).isoformat(),
+                        sequence=_next_sequence(),
+                        nodes_added=[viz_node],
+                        nodes_updated=[],
+                        nodes_removed=[],
+                        edges_added=[],
+                        edges_removed=[],
+                    )
+                    await broadcast_delta(delta)
+                except Exception as e:
+                    logger.error(f"Failed to broadcast message creation: {e}")
+
+        elif event.type == EventType.CROSS_TAB_NOTIFICATION:
+            # Handle cross-tab notifications (same as NOTIFICATION_CREATED)
+            notification_msg = {
+                "type": "notification",
+                "data": {
+                    "notification_id": event.payload.get("metadata", {}).get("notification_id", ""),
+                    "notification_type": event.payload.get("notification_type", "info"),
+                    "message": event.payload.get("message", ""),
+                    "target_tab": event.payload.get("target_tabs", ["build"])[0],  # Primary tab
+                    "urgency": event.payload.get("urgency", "info"),
+                    "metadata": event.payload.get("metadata", {}),
+                    "related_node_id": event.payload.get("related_node_id"),
+                    "timestamp": datetime.fromtimestamp(event.timestamp, timezone.utc).isoformat(),
+                    "source": event.source,
+                }
+            }
+            await broadcast_json(notification_msg)
 
     except Exception as e:
         logger.error(f"Failed to broadcast graph event {event.type.value}: {e}")
@@ -3107,6 +3195,50 @@ async def get_parallel_pipeline_whitelist(request: Request) -> JSONResponse:
 
 
 # =============================================================================
+# RESEARCH FEEDBACK ENDPOINTS
+# =============================================================================
+
+async def get_research_task(request: Request) -> JSONResponse:
+    """
+    GET /api/research/{research_task_id}
+
+    Get a single research task with full metadata.
+    Wrapper for research_feedback_endpoints.get_research_task.
+    """
+    return await _get_research_task(request)
+
+
+async def submit_research_feedback(request: Request) -> JSONResponse:
+    """
+    POST /api/research/{research_task_id}/feedback
+
+    Submit user feedback on a research task.
+    Wrapper that injects WebSocket globals.
+    """
+    return await _submit_research_feedback(request, _ws_connections, _next_sequence, broadcast_delta)
+
+
+async def submit_research_response(request: Request) -> JSONResponse:
+    """
+    POST /api/research/{research_task_id}/response
+
+    Submit structured response to research task (approve/revise/clarify).
+    Wrapper that injects WebSocket globals.
+    """
+    return await _submit_research_response(request, _ws_connections, _next_sequence, broadcast_delta)
+
+
+async def get_active_research_tasks(request: Request) -> JSONResponse:
+    """
+    GET /api/research/tasks/active
+
+    Get all research tasks awaiting user feedback.
+    Wrapper for research_feedback_endpoints.get_active_research_tasks.
+    """
+    return await _get_active_research_tasks(request)
+
+
+# =============================================================================
 # NOTIFICATION ENDPOINTS (Cross-Tab Notifications)
 # =============================================================================
 
@@ -3661,6 +3793,12 @@ def create_routes() -> List[Route]:
         Route("/api/nodes/{node_id}/reverse-connections", get_node_reverse_connections, methods=["GET"]),
         Route("/api/nodes/{node_id}/messages", get_node_messages, methods=["GET"]),
 
+        # Research feedback endpoints
+        Route("/api/research/{research_task_id}", get_research_task, methods=["GET"]),
+        Route("/api/research/{research_task_id}/feedback", submit_research_feedback, methods=["POST"]),
+        Route("/api/research/{research_task_id}/response", submit_research_response, methods=["POST"]),
+        Route("/api/research/tasks/active", get_active_research_tasks, methods=["GET"]),
+
         # Notification endpoints (Cross-Tab Notifications)
         Route("/api/notifications/pending", get_pending_notifications, methods=["GET"]),
         Route("/api/notifications/{notification_id}/mark-read", mark_notification_read, methods=["POST"]),
@@ -3703,16 +3841,25 @@ def create_app() -> Starlette:
     # Subscribe to graph events on startup
     if EVENT_BUS_AVAILABLE:
         event_bus = get_event_bus()
+        # Core graph mutation events
         event_bus.subscribe_async(EventType.NODE_CREATED, broadcast_graph_event)
         event_bus.subscribe_async(EventType.NODE_UPDATED, broadcast_graph_event)
         event_bus.subscribe_async(EventType.NODE_DELETED, broadcast_graph_event)
         event_bus.subscribe_async(EventType.EDGE_CREATED, broadcast_graph_event)
         event_bus.subscribe_async(EventType.EDGE_DELETED, broadcast_graph_event)
+        # Orchestrator events
         event_bus.subscribe_async(EventType.ORCHESTRATOR_ERROR, broadcast_graph_event)
         event_bus.subscribe_async(EventType.PHASE_CHANGED, broadcast_graph_event)
+        # Notification events
         event_bus.subscribe_async(EventType.NOTIFICATION_CREATED, broadcast_graph_event)
+        event_bus.subscribe_async(EventType.CROSS_TAB_NOTIFICATION, broadcast_graph_event)
+        # Dialogue and message events
         event_bus.subscribe_async(EventType.DIALOGUE_TURN_ADDED, broadcast_graph_event)
-        logger.info("Subscribed to graph events for WebSocket broadcasting")
+        event_bus.subscribe_async(EventType.MESSAGE_CREATED, broadcast_graph_event)
+        # Research feedback events
+        event_bus.subscribe_async(EventType.RESEARCH_FEEDBACK_RECEIVED, broadcast_graph_event)
+        event_bus.subscribe_async(EventType.RESEARCH_TASK_COMPLETED, broadcast_graph_event)
+        logger.info("Subscribed to all graph events for WebSocket broadcasting")
 
     return app
 
