@@ -1,0 +1,316 @@
+{
+  "api_examples": {
+    "get_research_task": {
+      "endpoint": "GET /api/research/{research_task_id}",
+      "description": "Get detailed information about a research task",
+      "curl_example": "curl http://localhost:8000/api/research/research_abc123",
+      "response": {
+        "node_id": "research_abc123",
+        "req_node_id": "req_xyz789",
+        "iteration": 1,
+        "query": "How should we implement user authentication?",
+        "total_findings": 5,
+        "total_ambiguities": 2,
+        "blocking_count": 0,
+        "out_of_scope": ["OAuth integration", "LDAP"],
+        "synthesis": "Based on research, JWT-based authentication is recommended with HS256 for symmetric signing...",
+        "findings": [
+          {
+            "topic": "JWT Security",
+            "summary": "Use HS256 for symmetric signing, RS256 for asymmetric",
+            "source": "https://jwt.io/introduction",
+            "confidence": 0.95
+          },
+          {
+            "topic": "Session Management",
+            "summary": "Implement refresh tokens with 7-day expiry",
+            "confidence": 0.9
+          }
+        ],
+        "ambiguities": [
+          {
+            "category": "UNDEFINED_TERM",
+            "text": "production-ready",
+            "impact": "CLARIFYING",
+            "suggested_question": "What security certifications are required?"
+          }
+        ],
+        "search_results": [
+          {
+            "title": "JWT Best Practices",
+            "url": "https://jwt.io/introduction"
+          }
+        ],
+        "created_at": "2025-12-08T10:30:00Z",
+        "status": "PENDING",
+        "user_approval_required": false,
+        "user_approval_state": "pending",
+        "user_feedback": null,
+        "awaiting_user_action": false,
+        "hover_metadata": {
+          "findings_tooltip": "5 findings from research",
+          "ambiguities_tooltip": "2 ambiguities detected",
+          "synthesis_tooltip": "Research synthesis and conclusions"
+        }
+      }
+    },
+    "submit_feedback": {
+      "endpoint": "POST /api/research/{research_task_id}/feedback",
+      "description": "Submit user feedback on research",
+      "curl_example": "curl -X POST http://localhost:8000/api/research/research_abc123/feedback -H 'Content-Type: application/json' -d @feedback.json",
+      "request": {
+        "feedback": "Great research! Please add performance benchmarks for JWT validation",
+        "metadata": {
+          "rating": 4,
+          "issues": ["Missing performance data"],
+          "suggestions": ["Add latency measurements", "Compare with session cookies"]
+        }
+      },
+      "response": {
+        "success": true,
+        "feedback_node_id": "msg_feedback_def456",
+        "research_node_id": "research_abc123",
+        "message": "Feedback submitted successfully"
+      },
+      "side_effects": [
+        "Creates MESSAGE node with feedback",
+        "Creates HAS_FEEDBACK edge",
+        "Updates research node with feedback reference",
+        "Publishes RESEARCH_FEEDBACK_RECEIVED event",
+        "Broadcasts WebSocket delta to clients"
+      ]
+    },
+    "approve_research": {
+      "endpoint": "POST /api/research/{research_task_id}/response",
+      "description": "Approve research and trigger phase transition",
+      "curl_example": "curl -X POST http://localhost:8000/api/research/research_abc123/response -H 'Content-Type: application/json' -d @approve.json",
+      "request": {
+        "action": "approve",
+        "message": "Research approved. Proceed to implementation planning.",
+        "context": {
+          "notes": "All requirements captured"
+        }
+      },
+      "response": {
+        "success": true,
+        "action": "approve",
+        "message_id": "msg_user_orch_ghi789",
+        "phase_transition": "RESEARCH -> PLAN"
+      },
+      "side_effects": [
+        "Sends agent message to orchestrator",
+        "Updates research status to VERIFIED",
+        "Sets user_approval_state to 'approved'",
+        "Publishes RESEARCH_TASK_COMPLETED event",
+        "Triggers orchestrator phase transition"
+      ]
+    },
+    "request_revision": {
+      "endpoint": "POST /api/research/{research_task_id}/response",
+      "description": "Request revision on research",
+      "curl_example": "curl -X POST http://localhost:8000/api/research/research_abc123/response -H 'Content-Type: application/json' -d @revise.json",
+      "request": {
+        "action": "revise",
+        "message": "Please add more security details",
+        "context": {
+          "revision_notes": "Need explicit JWT token structure examples",
+          "areas_to_expand": ["Security", "Error handling"]
+        }
+      },
+      "response": {
+        "success": true,
+        "action": "revise",
+        "message_id": "msg_user_orch_jkl012",
+        "phase_transition": null
+      },
+      "side_effects": [
+        "Sends agent message to orchestrator with revision context",
+        "Sets user_approval_state to 'revision_requested'",
+        "Sets awaiting_user_action to true",
+        "Research status remains PENDING"
+      ]
+    },
+    "request_clarification": {
+      "endpoint": "POST /api/research/{research_task_id}/response",
+      "description": "Request clarification on ambiguities",
+      "curl_example": "curl -X POST http://localhost:8000/api/research/research_abc123/response -H 'Content-Type: application/json' -d @clarify.json",
+      "request": {
+        "action": "clarify",
+        "message": "Please clarify the performance requirements",
+        "context": {
+          "clarification_needed": [
+            "What are acceptable JWT validation latency targets?",
+            "What is the expected request volume?"
+          ]
+        }
+      },
+      "response": {
+        "success": true,
+        "action": "clarify",
+        "message_id": "msg_user_orch_mno345",
+        "phase_transition": null
+      }
+    },
+    "get_active_tasks": {
+      "endpoint": "GET /api/research/tasks/active",
+      "description": "Get all research tasks awaiting user action",
+      "curl_example": "curl http://localhost:8000/api/research/tasks/active?limit=10",
+      "response": {
+        "tasks": [
+          {
+            "node_id": "research_abc123",
+            "req_node_id": "req_xyz789",
+            "query": "How should we implement user authentication?",
+            "synthesis": "Based on research, JWT-based authentication is recommended...",
+            "total_findings": 5,
+            "total_ambiguities": 2,
+            "awaiting_user_action": true,
+            "user_approval_state": "pending",
+            "created_at": "2025-12-08T10:30:00Z",
+            "action_hint": "Review research findings and approve or request revision"
+          },
+          {
+            "node_id": "research_def456",
+            "req_node_id": "req_uvw123",
+            "query": "Database schema design for user profiles",
+            "synthesis": "PostgreSQL with JSONB columns recommended...",
+            "total_findings": 8,
+            "total_ambiguities": 1,
+            "awaiting_user_action": true,
+            "user_approval_state": "revision_requested",
+            "created_at": "2025-12-08T09:15:00Z",
+            "action_hint": "Revision requested - awaiting updated research"
+          }
+        ],
+        "count": 2
+      }
+    }
+  },
+  "websocket_messages": {
+    "research_feedback_event": {
+      "type": "research_feedback",
+      "description": "Broadcast when user submits feedback",
+      "message": {
+        "type": "research_feedback",
+        "data": {
+          "research_node_id": "research_abc123",
+          "feedback_node_id": "msg_feedback_def456",
+          "feedback_text": "Great research! Please add performance benchmarks",
+          "metadata": {
+            "rating": 4,
+            "issues": ["Missing performance data"]
+          }
+        },
+        "timestamp": 1702123456.789
+      }
+    },
+    "research_completed_event": {
+      "type": "research_completed",
+      "description": "Broadcast when user approves research",
+      "message": {
+        "type": "research_completed",
+        "data": {
+          "research_node_id": "research_abc123",
+          "approved": true,
+          "message_id": "msg_user_orch_ghi789"
+        },
+        "timestamp": 1702123456.789
+      }
+    },
+    "delta_on_feedback": {
+      "type": "delta",
+      "description": "Graph delta when feedback is submitted",
+      "message": {
+        "type": "delta",
+        "data": {
+          "timestamp": "2025-12-08T11:15:00Z",
+          "sequence": 42,
+          "nodes_added": [
+            {
+              "id": "msg_feedback_def456",
+              "type": "MESSAGE",
+              "label": "Research feedback: Great research!...",
+              "status": "VERIFIED"
+            }
+          ],
+          "edges_added": [
+            {
+              "source": "research_abc123",
+              "target": "msg_feedback_def456",
+              "type": "HAS_FEEDBACK"
+            }
+          ],
+          "nodes_updated": [
+            {
+              "id": "research_abc123",
+              "type": "RESEARCH",
+              "label": "Research: How should we implement...",
+              "status": "PENDING"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "testing_examples": {
+    "pytest_commands": {
+      "run_all_tests": "pytest tests/unit/api/test_research_feedback.py -v",
+      "run_specific_class": "pytest tests/unit/api/test_research_feedback.py::TestGetResearchTask -v",
+      "run_with_coverage": "pytest tests/unit/api/test_research_feedback.py --cov=api.research_feedback_endpoints --cov-report=html",
+      "run_single_test": "pytest tests/unit/api/test_research_feedback.py::TestSubmitResearchFeedback::test_submit_feedback_success -v"
+    },
+    "manual_testing_checklist": [
+      "GET /api/research/{id} returns full research data with hover metadata",
+      "POST /api/research/{id}/feedback creates MESSAGE node and HAS_FEEDBACK edge",
+      "POST /api/research/{id}/response with action=approve updates status to VERIFIED",
+      "POST /api/research/{id}/response with action=revise sets awaiting_user_action=true",
+      "POST /api/research/{id}/response with action=clarify sends message to orchestrator",
+      "GET /api/research/tasks/active returns only tasks needing user attention",
+      "WebSocket clients receive research_feedback events in real-time",
+      "WebSocket clients receive research_completed events when approved",
+      "Feedback nodes appear in graph visualization with correct edges",
+      "Agent messages reach orchestrator inbox for processing"
+    ]
+  },
+  "error_responses": {
+    "research_not_found": {
+      "status_code": 400,
+      "response": {
+        "error": "Node research_abc123 is not a RESEARCH node"
+      }
+    },
+    "feedback_empty": {
+      "status_code": 400,
+      "response": {
+        "error": "Feedback text is required"
+      }
+    },
+    "invalid_action": {
+      "status_code": 400,
+      "response": {
+        "error": "Action must be 'approve', 'revise', or 'clarify'"
+      }
+    },
+    "node_not_found": {
+      "status_code": 500,
+      "response": {
+        "error": "Failed to retrieve research task: Node not found"
+      }
+    }
+  },
+  "integration_notes": {
+    "required_imports": [
+      "from api.research_feedback_endpoints import get_research_task, submit_research_feedback, submit_research_response, get_active_research_tasks"
+    ],
+    "route_registrations": [
+      "Route('/api/research/{research_task_id}', get_research_task, methods=['GET'])",
+      "Route('/api/research/{research_task_id}/feedback', submit_research_feedback_wrapper, methods=['POST'])",
+      "Route('/api/research/{research_task_id}/response', submit_research_response_wrapper, methods=['POST'])",
+      "Route('/api/research/tasks/active', get_active_research_tasks, methods=['GET'])"
+    ],
+    "websocket_subscriptions": [
+      "event_bus.subscribe_async(EventType.RESEARCH_FEEDBACK_RECEIVED, on_research_feedback)",
+      "event_bus.subscribe_async(EventType.RESEARCH_TASK_COMPLETED, on_research_completed)"
+    ]
+  }
+}
